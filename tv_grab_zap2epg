@@ -1,0 +1,1006 @@
+#!/bin/bash
+# tv_grab_zap2epg zap2it.com TV schedule grabber for tvheadend
+################################################################################
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+################################################################################
+
+# Default path for RasbPi Kodi+TVH
+BaseDir="$HOME/script.module.zap2epg/epggrab"
+# If running on synology NAS assume TVH only
+[ "$(uname -a | grep -i synology)" ] && BaseDir="$HOME/var/epggrab"
+# If running on common linux under hts user
+[ "$(id hts 2>/dev/null)" ] && BaseDir="$HOME/zap2epg"
+
+CacheDir="$BaseDir/cache"
+ConfDir="$BaseDir/conf"
+ConfFile="$ConfDir/zap2epg.xml"
+LogDir="$BaseDir/log"
+LogFile="$LogDir/zap2epg.log"
+XMLTV="$CacheDir/xmltv.xml"
+#
+DaysPattern='^[1-9]$|^1[0-4]$'
+CACodePattern='^[A-Z][0-9][A-Z][ ]?[0-9][A-Z][0-9]$'
+USCodePattern='^[0-9]{5}$'
+#
+Quiet="false"
+ZipCode=""
+Offset=""
+Days=""
+
+zap2epg() {
+	read -r -d '' script <<-"----EOF"
+import urllib.request, urllib.error, urllib.parse
+import base64
+import codecs
+import time
+import datetime
+import _strptime
+import calendar
+import gzip
+import os
+import logging
+import re
+import json
+import sys
+from os.path import dirname
+import xml.etree.ElementTree as ET
+from collections import OrderedDict
+import hashlib
+import requests
+from requests.auth import HTTPDigestAuth
+
+def mainRun(userdata):
+    settingsFile = os.path.join(userdata, os.environ.get('ConfFile'))
+    settings = ET.parse(settingsFile)
+    root = settings.getroot()
+    settingsDict = {}
+    xdescOrderDict = {}
+    logging.info('Running zap2epg-3.0')
+    kodiVersion = root.attrib.get('version')
+    logging.info('Kodi settings version: %s', kodiVersion)
+    for setting in root.findall('setting'):
+        if kodiVersion == '2':
+            settingStr = setting.text
+        else:
+            settingStr = setting.get('value')
+            if settingStr == '':
+                settingStr = None
+        settingID = setting.get('id')
+        settingsDict[settingID] = settingStr
+    for setting in settingsDict:
+        if setting == 'slist':
+            stationList = settingsDict[setting]
+        if setting == 'zipcode':
+            if "ZipCode" in os.environ:
+                zipcode = os.environ.get('ZipCode')
+            else:
+                zipcode = settingsDict[setting]
+        if setting == 'lineup':
+            lineup = settingsDict[setting]
+        if setting == 'lineupcode':
+            lineupcode = settingsDict[setting]
+        if setting == 'device':
+            device = settingsDict[setting]
+        if setting == 'days':
+            if "Days" in os.environ:
+                days = os.environ.get('Days')
+            else:
+                days = settingsDict[setting]
+        if setting == 'redays':
+            redays = settingsDict[setting]
+        if setting == 'xdetails':
+            xdetails = settingsDict[setting]
+        if setting == 'xdesc':
+            xdesc = settingsDict[setting]
+        if setting == 'epicon':
+            epicon = settingsDict[setting]
+        if setting == 'epgenre':
+            epgenre = settingsDict[setting]
+        if setting == 'tvhoff':
+            tvhoff = settingsDict[setting]
+        if setting == 'tvhurl':
+            tvhurl = settingsDict[setting]
+        if setting == 'tvhport':
+            tvhport = settingsDict[setting]
+        if setting == 'usern':
+            usern = settingsDict[setting]
+        if setting == 'passw':
+            passw = settingsDict[setting]
+        if setting == 'chmatch':
+            chmatch = settingsDict[setting]
+        if setting == 'tvhmatch':
+            tvhmatch = settingsDict[setting]
+        if setting == 'stitle':
+            stitle = settingsDict[setting]
+        if setting.startswith('desc'):
+            xdescOrderDict[setting] = (settingsDict[setting])
+    xdescOrder = [value for (key, value) in sorted(xdescOrderDict.items())]
+    if lineupcode != 'lineupId':
+        chmatch = 'false'
+        tvhmatch = 'false'
+    if zipcode.isdigit():
+        country = 'USA'
+        logging.info('\tCountry: United States of America [%s]', country)
+        logging.info('\tZIP code: %s', zipcode)
+    else:
+        country = 'CAN'
+        logging.info('\tCountry: Canada [%s]', country)
+        logging.info('\tPostal code: %s', zipcode)
+    if "Offset" in os.environ:
+        offset = float(os.environ.get('Offset'))
+    else:
+        offset = 0.0
+    pythonStartTime = time.time()
+    dayHours = int(days) * 8 # set back to 8 when done testing
+    gridtimeStart = (int(time.mktime(time.strptime(str(datetime.datetime.now().replace(microsecond=0,second=0,minute=0)), '%Y-%m-%d %H:%M:%S'))) + offset*86400)
+    cacheDir = os.path.join(userdata, os.environ.get('CacheDir'))
+    schedule = {}
+    tvhMatchDict = {}
+    logging.info('\tTV Guide duration: %s days', days)
+    if int(offset) > 1:
+        logging.info('\tTV Guide Start: %i [offset: %i days]', int(gridtimeStart), int(offset))
+    elif int(offset) == 1:
+        logging.info('\tTV Guide Start: %i [offset: %i day]', int(gridtimeStart), int(offset))
+    else:
+        logging.info('\tTV Guide Start: %i', int(gridtimeStart))
+    logging.info('\tLineup: %s', lineup)
+    logging.info('\tConfiguration file: %s', settingsFile)
+    logging.info('\tCaching directory path: %s', cacheDir)
+
+    def tvhMatchGet():
+        tvhUrlBase = 'http://' + tvhurl + ":" + tvhport
+        channels_url = tvhUrlBase + '/api/channel/grid?all=1&limit=999999999&sort=name&filter=[{"type":"boolean","value":true,"field":"enabled"}]'
+        if usern is not None and passw is not None:
+            logging.info('Tvheadend access using username and password...')
+            response = requests.get(channels_url, auth=HTTPDigestAuth(usern, passw))
+        else:
+            logging.info('Tvheadend anonymous access...')
+            response = requests.get(channels_url)
+        try:
+            logging.info('Accessing Tvheadend channel list from: %s', tvhUrlBase)
+            channels = response.json()
+            for ch in channels['entries']:
+                channelName = ch['name']
+                channelNum = ch['number']
+                tvhMatchDict[channelNum] = channelName
+            logging.info('%s Tvheadend channels found...', str(len(tvhMatchDict)))
+        except urllib.error.HTTPError as e:
+            logging.exception('Exception: tvhMatch - %s', e.strerror)
+            pass
+
+    def deleteOldCache(gridtimeStart):
+        logging.info('Checking for old cache files...')
+        try:
+            if os.path.exists(cacheDir):
+                entries = os.listdir(cacheDir)
+                for entry in entries:
+                    oldfile = entry.split('.')[0]
+                    if oldfile.isdigit():
+                        fn = os.path.join(cacheDir, entry)
+                        if (int(oldfile)) < (gridtimeStart + (int(redays) * 86400)):
+                            try:
+                                os.remove(fn)
+                                logging.info('Deleting old cache: %s', entry)
+                            except OSError as e:
+                                logging.warning('Error Deleting: %s - %s.' % (e.filename, e.strerror))
+        except Exception as e:
+            logging.exception('Exception: deleteOldCache - %s', e.strerror)
+
+    def deleteOldShowCache(showList):
+        logging.info('Checking for old show cache files...')
+        try:
+            if os.path.exists(cacheDir):
+                entries = os.listdir(cacheDir)
+                for entry in entries:
+                    oldfile = entry.split('.')[0]
+                    if not oldfile.isdigit():
+                        fn = os.path.join(cacheDir, entry)
+                        if oldfile not in showList:
+                            try:
+                                os.remove(fn)
+                                logging.info('Deleting old show cache: %s', entry)
+                            except OSError as e:
+                                logging.warning('Error Deleting: %s - %s.' % (e.filename, e.strerror))
+        except Exception as e:
+            logging.exception('Exception: deleteOldshowCache - %s', e.strerror)
+
+    def convTime(t):
+        return time.strftime("%Y%m%d%H%M%S",time.localtime(int(t)))
+
+    def convHTML(data):
+        data = data.replace('&','&amp;')
+        data = data.replace('"','&quot;')
+        data = data.replace("'",'&apos;')
+        data = data.replace('<','&lt;')
+        data = data.replace('>','&gt;')
+        return data;
+
+    def convTitleExcept(data):
+        exception = "CTV CW HD ION ION: NHK PBS TV TVA"
+        data = " ".join([word.title() if word not in exception else word for word in data.split(" ")])
+        return data;
+
+    def savepage(fn, data):
+        if not os.path.exists(cacheDir):
+            os.mkdir(cacheDir)
+        fileDir = os.path.join(cacheDir, fn)
+        with gzip.open(fileDir,"wb+") as f:
+            f.write(data)
+            f.close()
+
+    def genreSort(EPfilter, EPgenre):
+        genreList = []
+        if epgenre == '2':
+            # for f in EPfilter:
+            #     fClean = re.sub('filter-','',f)
+            #     genreList.append(fClean)
+            for g in EPgenre:
+                if g != "Comedy":
+                    genreList.append(g)
+            if 'Movie' in genreList or 'movie' in genreList or 'Movies' in genreList:
+                genreList.insert(0, "Movie / Drama")
+            if 'News' in genreList:
+                genreList.insert(0, "News / Current affairs")
+            if 'Game show' in genreList:
+                genreList.insert(0, "Game show / Quiz / Contest")
+            if 'Law' in genreList:
+                genreList.insert(0, "Show / Game show")
+            if 'Art' in genreList or 'Culture' in genreList:
+                genreList.insert(0, "Arts / Culture (without music)")
+            if 'Entertainment' in genreList:
+                genreList.insert(0, "Popular culture / Traditional Arts")
+            if 'Politics' in genreList or 'Social' in genreList or 'Public affairs' in genreList:
+                genreList.insert(0, "Social / Political issues / Economics")
+            if 'Education' in genreList or 'Science' in genreList:
+                genreList.insert(0, "Education / Science / Factual topics")
+            if 'How-to' in genreList:
+                genreList.insert(0, "Leisure hobbies")
+            if 'Travel' in genreList:
+                genreList.insert(0, "Tourism / Travel")
+            if 'Sitcom' in genreList:
+                genreList.insert(0, "Variety show")
+            if 'Talk' in genreList:
+                genreList.insert(0, "Talk show")
+            if 'Children' in genreList:
+                genreList.insert(0, "Children's / Youth programs")
+            if 'Animated' in genreList:
+                genreList.insert(0, "Cartoons / Puppets")
+            if 'Music' in genreList:
+                genreList.insert(0, "Music / Ballet / Dance")
+        if epgenre == '1':
+            # for f in EPfilter:
+            #     fClean = re.sub('filter-','',f)
+            #     genreList.append(fClean)
+            for g in EPgenre:
+                genreList.append(g)
+            if 'Movie' in genreList or 'movie' in genreList or 'Movies' in genreList:
+                genreList = ["Movie / Drama"]
+            elif 'News' in genreList:
+                genreList = ["News / Current affairs"]
+            elif 'News magazine' in genreList:
+                genreList = ["News magazine"]
+            elif 'Public affairs' in genreList:
+                genreList = ["News / Current affairs"]
+            elif 'Interview' in genreList:
+                genreList = ["Discussion / Interview / Debate"]
+            elif 'Game show' in genreList:
+                genreList = ["Game show / Quiz / Contest"]
+            elif 'Talk' in genreList:
+                genreList = ["Talk show"]
+            elif 'Sports' in genreList:
+                genreList = ["Sports"]
+            elif 'Sitcom' in genreList:
+                genreList = ["Variety show"]
+            elif 'Children' in genreList:
+                genreList = ["Children's / Youth programs"]
+            else:
+                genreList = ["Variety show"]
+        if epgenre == '3':
+            # for f in EPfilter:
+            #     fClean = re.sub('filter-','',f)
+            #     genreList.append(fClean)
+            for g in EPgenre:
+                genreList.append(g)
+        if 'Movie' in genreList:
+            genreList.remove('Movie')
+            genreList.insert(0, 'Movie')
+        return genreList
+
+    def printHeader(fh, enc):
+        logging.info('Creating xmltv.xml file...')
+        fh.write("<?xml version=\"1.0\" encoding=\""+ enc + "\"?>\n")
+        fh.write("<!DOCTYPE tv SYSTEM \"xmltv.dtd\">\n\n")
+        fh.write("<tv source-info-url=\"http://tvschedule.zap2it.com/\" source-info-name=\"zap2it.com\">\n")
+
+    def printFooter(fh):
+        fh.write("</tv>\n")
+
+    def printStations(fh):
+        global stationCount
+        stationCount = 0
+        try:
+            logging.info('Writing Stations to xmltv.xml file...')
+            try:
+                scheduleSort = OrderedDict(sorted(iter(schedule.items()), key=lambda x: int(x[1]['chnum'])))
+            except:
+                scheduleSort = OrderedDict(sorted(iter(schedule.items()), key=lambda x: x[1]['chfcc']))
+            for station in scheduleSort:
+                fh.write('\t<channel id=\"' + station + '.zap2epg\">\n')
+                if 'chtvh' in scheduleSort[station] and scheduleSort[station]['chtvh'] is not None:
+                    xchtvh = convHTML(scheduleSort[station]['chtvh'])
+                    fh.write('\t\t<display-name>' + xchtvh + '</display-name>\n')
+                if 'chnum' in scheduleSort[station] and 'chfcc' in scheduleSort[station]:
+                    xchnum = scheduleSort[station]['chnum']
+                    xchfcc = scheduleSort[station]['chfcc']
+                    xchnam = scheduleSort[station]['chnam']
+                    fh.write('\t\t<display-name>' + xchnum + ' ' + convHTML(xchfcc) + '</display-name>\n')
+                    if xchnam != "INDEPENDENT":
+                        fh.write('\t\t<display-name>' + convHTML(xchnam) + '</display-name>\n')
+                    fh.write('\t\t<display-name>' + convHTML(xchfcc) + '</display-name>\n')
+                    fh.write('\t\t<display-name>' + xchnum + '</display-name>\n')
+                elif 'chfcc' in scheduleSort[station]:
+                    xchnum = scheduleSort[station]['chfcc']
+                    fh.write('\t\t<display-name>' + convHTML(xcfcc) + '</display-name>\n')
+                elif 'chnum' in scheduleSort[station]:
+                    xchnum = scheduleSort[station]['chnum']
+                    fh.write('\t\t<display-name>' + xchnum + '</display-name>\n')
+                if 'chicon' in scheduleSort[station]:
+                    fh.write("\t\t<icon src=\"http:" + scheduleSort[station]['chicon'] + "\" />\n")
+                fh.write("\t</channel>\n")
+                stationCount += 1
+        except Exception as e:
+            logging.exception('Exception: printStations')
+
+    def printEpisodes(fh):
+        global episodeCount
+        episodeCount = 0
+        try:
+            logging.info('Writing Episodes to xmltv.xml file...')
+            if xdesc is True:
+                logging.info('Appending Xdetails to description for xmltv.xml file...')
+            for station in schedule:
+                lang = 'en'
+                sdict = schedule[station]
+                for episode in sdict:
+                    if not episode.startswith("ch"):
+                        try:
+                            edict = sdict[episode]
+                            if 'epstart' in edict:
+                                startTime = convTime(edict['epstart'])
+                                is_dst = time.daylight and time.localtime().tm_isdst > 0
+                                TZoffset = "%.2d%.2d" %(- (time.altzone if is_dst else time.timezone)/3600, 0)
+                                stopTime = convTime(edict['epend'])
+                                fh.write('\t<programme start=\"' + startTime + ' ' + TZoffset + '\" stop=\"' + stopTime + ' ' + TZoffset + '\" channel=\"' + station + '.zap2epg' + '\">\n')
+                                dd_progid = edict['epid']
+                                fh.write('\t\t<episode-num system=\"dd_progid\">' + dd_progid[:-4] + '.' + dd_progid[-4:] + '</episode-num>\n')
+                                if edict['epshow'] is not None:
+                                    fh.write('\t\t<title lang=\"' + lang + '\">' + convHTML(edict['epshow']) + '</title>\n')
+                                if edict['eptitle'] is not None:
+                                    showTitle = convHTML(edict['epshow'])
+                                    if stitle == "true":
+                                        safeTitle = re.sub('[\\/*?:|]', "_", showTitle)
+                                        fh.write('\t\t<title lang=\"' + lang + '\">' + safeTitle + '</title>\n')
+                                    else:
+                                        fh.write('\t\t<title lang=\"' + lang + '\">' + showTitle + '</title>\n')
+                                if xdesc == 'true':
+                                    xdescSort = addXDetails(edict)
+                                    fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(xdescSort) + '</desc>\n')
+                                if xdesc == 'false':
+                                    if edict['epdesc'] is not None:
+                                        fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(edict['epdesc']) + '</desc>\n')
+                                if edict['eplength'] is not None:
+                                    fh.write('\t\t<length units="minutes">' + edict['eplength'] + '</length>\n')
+                                if edict['epsn'] is not None and edict['epen'] is not None:
+                                    fh.write("\t\t<episode-num system=\"onscreen\">" + 'S' + edict['epsn'].zfill(2) + 'E' + edict['epen'].zfill(2) + "</episode-num>\n")
+                                    fh.write("\t\t<episode-num system=\"xmltv_ns\">" + str(int(edict['epsn'])-1) +  "." + str(int(edict['epen'])-1) + ".</episode-num>\n")
+                                if edict['epyear'] is not None:
+                                    fh.write('\t\t<date>' + edict['epyear'] + '</date>\n')
+                                if not episode.startswith("MV"):
+                                    if epicon == '1':
+                                        if edict['epimage'] is not None and edict['epimage'] != '':
+                                            fh.write('\t\t<icon src="https://zap2it.tmsimg.com/assets/' + edict['epimage'] + '.jpg" />\n')
+                                        else:
+                                            if edict['epthumb'] is not None and edict['epthumb'] != '':
+                                                fh.write('\t\t<icon src="https://zap2it.tmsimg.com/assets/' + edict['epthumb'] + '.jpg" />\n')
+                                    if epicon == '2':
+                                        if edict['epthumb'] is not None and edict['epthumb'] != '':
+                                            fh.write('\t\t<icon src="https://zap2it.tmsimg.com/assets/' + edict['epthumb'] + '.jpg" />\n')
+                                if episode.startswith("MV"):
+                                    if edict['epthumb'] is not None and edict['epthumb'] != '':
+                                        fh.write('\t\t<icon src="https://zap2it.tmsimg.com/assets/' + edict['epthumb'] + '.jpg" />\n')
+                                if not any(i in ['New', 'Live'] for i in edict['epflag']):
+                                    fh.write("\t\t<previously-shown ")
+                                    if edict['epoad'] is not None and int(edict['epoad']) > 0:
+                                        fh.write("start=\"" + convTime(edict['epoad']) + " " + TZoffset + "\"")
+                                    fh.write(" />\n")
+                                if edict['eptags'] is not None:
+                                    if 'CC' in edict['eptags']:
+                                        fh.write('\t\t<subtitles type="teletext" />\n')
+                                if edict['epflag'] is not None:
+                                    if 'Finale' in edict['epflag']:
+                                        fh.write("\t\t<last-chance />\n")
+                                    if 'Live' in edict['epflag']:
+                                        fh.write("\t\t<live />\n")
+                                    if 'New' in edict['epflag']:
+                                        fh.write("\t\t<new />\n")
+                                    if 'Premiere' in edict['epflag']:
+                                        fh.write("\t\t<premiere />\n")
+                                if edict['eprating'] is not None:
+                                    fh.write('\t\t<rating>\n\t\t\t<value>' + edict['eprating'] + '</value>\n\t\t</rating>\n')
+                                if edict['epstar'] is not None:
+                                    fh.write('\t\t<star-rating>\n\t\t\t<value>' + edict['epstar'] + '/4</value>\n\t\t</star-rating>\n')
+                                if edict['epcredits'] is not None:
+                                    fh.write("\t\t<credits>\n")
+                                    for c in edict['epcredits']:
+                                        if c['assetId'] is not None:
+                                            crole=c['role']
+                                            fh.write('\t\t\t<' + c['role'].lower() + ' role="' + convHTML(c['characterName']) + '" src="https://zap2it.tmsimg.com/assets/' + c['assetId'] + '">' + convHTML(c['name']) + '</' + c['role'].lower() + '>\n')
+                                        else:
+                                            fh.write('\t\t\t<' + c['role'].lower() + ' role="' + convHTML(c['characterName']) + '">' + convHTML(c['name']) + '</' + c['role'].lower() + '>\n')
+                                    fh.write("\t\t</credits>\n")
+                                if epgenre != '0':
+                                    if edict['epfilter'] is not None and edict['epgenres'] is not None:
+                                        genreNewList = genreSort(edict['epfilter'], edict['epgenres'])
+                                    elif edict['epfilter'] is not None:
+                                        genreNewList = edict['epfilter']
+                                    if genreNewList is not "":
+                                        for genre in genreNewList:
+                                            fh.write("\t\t<category lang=\"" + lang + "\">" + convHTML(genre).replace('filter-','') + "</category>\n")
+                                fh.write("\t</programme>\n")
+                                episodeCount += 1
+                        except Exception as e:
+                            logging.exception('No data for episode %s:', episode)
+                            #fn = os.path.join(cacheDir, episode + '.json')
+                            #os.remove(fn)
+                            #logging.info('Deleting episode %s:', episode)
+        except Exception as e:
+            logging.exception('Exception: printEpisodes')
+
+    def xmltv():
+        try:
+            enc = 'utf-8'
+            outFile = os.path.join(userdata, os.environ.get('XMLTV'))
+            fh = codecs.open(outFile, 'w+b', encoding=enc)
+            printHeader(fh, enc)
+            printStations(fh)
+            printEpisodes(fh)
+            printFooter(fh)
+            fh.close()
+        except Exception as e:
+            logging.exception('Exception: xmltv')
+
+    def parseStations(content):
+        try:
+            ch_guide = json.loads(content)
+            for station in ch_guide['channels']:
+                skey = station.get('channelId')
+                if stationList is not None:
+                    if skey in stationList:
+                        schedule[skey] = {}
+                        chSign = station.get('callSign')
+                        chName = station.get('affiliateName')
+                        schedule[skey]['chfcc'] = chSign
+                        schedule[skey]['chnam'] = chName
+                        schedule[skey]['chicon'] = station.get('thumbnail').split('?')[0]
+                        chnumStart = station.get('channelNo')
+                        if '.' not in chnumStart and chmatch == 'true' and chSign is not None:
+                            chsub = re.search('(\d+)$', chSign)
+                            if chsub is not None:
+                                chnumUpdate = chnumStart + '.' + chsub.group(0)
+                            else:
+                                chnumUpdate = chnumStart + '.1'
+                        else:
+                            chnumUpdate = chnumStart
+                        schedule[skey]['chnum'] = chnumUpdate
+                        if tvhmatch == 'true' and '.' in chnumUpdate:
+                            if chnumUpdate in tvhMatchDict:
+                                schedule[skey]['chtvh'] = tvhMatchDict[chnumUpdate]
+                            else:
+                                schedule[skey]['chtvh'] = None
+                else:
+                    schedule[skey] = {}
+                    chSign = station.get('callSign')
+                    chName = station.get('affiliateName')
+                    schedule[skey]['chfcc'] = chSign
+                    schedule[skey]['chnam'] = chName
+                    schedule[skey]['chicon'] = station.get('thumbnail').split('?')[0]
+                    chnumStart = station.get('channelNo')
+                    if '.' not in chnumStart and chmatch == 'true' and chSign is not None:
+                        chsub = re.search('(\d+)$', chSign)
+                        if chsub is not None:
+                            chnumUpdate = chnumStart + '.' + chsub.group(0)
+                        else:
+                            chnumUpdate = chnumStart + '.1'
+                    else:
+                        chnumUpdate = chnumStart
+                    schedule[skey]['chnum'] = chnumUpdate
+                    if tvhmatch == 'true' and '.' in chnumUpdate:
+                        if chnumUpdate in tvhMatchDict:
+                            schedule[skey]['chtvh'] = tvhMatchDict[chnumUpdate]
+                        else:
+                            schedule[skey]['chtvh'] = None
+        except Exception as e:
+            logging.exception('Exception: parseStations')
+
+    def parseEpisodes(content):
+        CheckTBA = "Safe"
+        try:
+            ch_guide = json.loads(content)
+            for station in ch_guide['channels']:
+                skey = station.get('channelId')
+                if stationList is not None:
+                    if skey in stationList:
+                        episodes = station.get('events')
+                        for episode in episodes:
+                            epkey = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
+                            schedule[skey][epkey] = {}
+                            schedule[skey][epkey]['epid'] = episode['program'].get('tmsId')
+                            schedule[skey][epkey]['epstart'] = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
+                            schedule[skey][epkey]['epend'] = str(calendar.timegm(time.strptime(episode.get('endTime'), '%Y-%m-%dT%H:%M:%SZ')))
+                            schedule[skey][epkey]['eplength'] = episode.get('duration')
+                            schedule[skey][epkey]['epshow'] = episode['program'].get('title')
+                            schedule[skey][epkey]['eptitle'] = episode['program'].get('episodeTitle')
+                            schedule[skey][epkey]['epdesc'] = episode['program'].get('shortDesc')
+                            schedule[skey][epkey]['epyear'] = episode['program'].get('releaseYear')
+                            schedule[skey][epkey]['eprating'] = episode.get('rating')
+                            schedule[skey][epkey]['epflag'] = episode.get('flag')
+                            schedule[skey][epkey]['eptags'] = episode.get('tags')
+                            schedule[skey][epkey]['epsn'] = episode['program'].get('season')
+                            schedule[skey][epkey]['epen'] = episode['program'].get('episode')
+                            schedule[skey][epkey]['epthumb'] = episode.get('thumbnail')
+                            schedule[skey][epkey]['epoad'] = None
+                            schedule[skey][epkey]['epstar'] = None
+                            schedule[skey][epkey]['epfilter'] = episode.get('filter')
+                            schedule[skey][epkey]['epgenres'] = None
+                            schedule[skey][epkey]['epcredits'] = None
+                            schedule[skey][epkey]['epxdesc'] = None
+                            schedule[skey][epkey]['epseries'] = episode.get('seriesId')
+                            schedule[skey][epkey]['epimage'] = None
+                            schedule[skey][epkey]['epfan'] = None
+                            if "TBA" in schedule[skey][epkey]['epshow']:
+                                CheckTBA = "Unsafe"
+                            elif schedule[skey][epkey]['eptitle']:
+                                if "TBA" in schedule[skey][epkey]['eptitle']:
+                                    CheckTBA = "Unsafe"
+                else:
+                    episodes = station.get('events')
+                    for episode in episodes:
+                        epkey = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
+                        schedule[skey][epkey] = {}
+                        schedule[skey][epkey]['epid'] = episode['program'].get('tmsId')
+                        schedule[skey][epkey]['epstart'] = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
+                        schedule[skey][epkey]['epend'] = str(calendar.timegm(time.strptime(episode.get('endTime'), '%Y-%m-%dT%H:%M:%SZ')))
+                        schedule[skey][epkey]['eplength'] = episode.get('duration')
+                        schedule[skey][epkey]['epshow'] = episode['program'].get('title')
+                        schedule[skey][epkey]['eptitle'] = episode['program'].get('episodeTitle')
+                        schedule[skey][epkey]['epdesc'] = episode['program'].get('shortDesc')
+                        schedule[skey][epkey]['epyear'] = episode['program'].get('releaseYear')
+                        schedule[skey][epkey]['eprating'] = episode.get('rating')
+                        schedule[skey][epkey]['epflag'] = episode.get('flag')
+                        schedule[skey][epkey]['eptags'] = episode.get('tags')
+                        schedule[skey][epkey]['epsn'] = episode['program'].get('season')
+                        schedule[skey][epkey]['epen'] = episode['program'].get('episode')
+                        schedule[skey][epkey]['epthumb'] = episode.get('thumbnail')
+                        schedule[skey][epkey]['epoad'] = None
+                        schedule[skey][epkey]['epstar'] = None
+                        schedule[skey][epkey]['epfilter'] = episode.get('filter')
+                        schedule[skey][epkey]['epgenres'] = None
+                        schedule[skey][epkey]['epcredits'] = None
+                        schedule[skey][epkey]['epxdesc'] = None
+                        schedule[skey][epkey]['epseries'] = episode.get('seriesId')
+                        schedule[skey][epkey]['epimage'] = None
+                        schedule[skey][epkey]['epfan'] = None
+                        if "TBA" in schedule[skey][epkey]['epshow']:
+                            CheckTBA = "Unsafe"
+                        elif schedule[skey][epkey]['eptitle']:
+                            if "TBA" in schedule[skey][epkey]['eptitle']:
+                                CheckTBA = "Unsafe"
+        except Exception as e:
+            logging.exception('Exception: parseEpisodes')
+        return CheckTBA
+
+    def genShowList():
+        showList = []
+        for station in schedule:
+            sdict = schedule[station]
+            for episode in sdict:
+                if not episode.startswith("ch"):
+                    edict = sdict[episode]
+                    showList.append(edict['epseries'])
+        return showList
+
+    def parseXdetails():
+        showList = []
+        failList = []
+        try:
+            for station in schedule:
+                sdict = schedule[station]
+                for episode in sdict:
+                    if not episode.startswith("ch"):
+                        edict = sdict[episode]
+                        EPseries = edict['epseries']
+                        showList.append(edict['epseries'])
+                        filename = EPseries + '.json'
+                        fileDir = os.path.join(cacheDir, filename)
+                        try:
+                            if not os.path.exists(fileDir) and EPseries not in failList:
+                                retry = 3
+                                while retry > 0:
+                                    logging.info('Downloading details data for: %s', EPseries)
+                                    url = 'https://tvlistings.zap2it.com/api/program/overviewDetails'
+                                    data = 'programSeriesID=' + EPseries
+                                    data_encode = data.encode('utf-8')
+                                    try:
+                                        URLcontent = urllib.request.Request(url, data=data_encode)
+                                        JSONcontent = urllib.request.urlopen(URLcontent).read()
+                                        if JSONcontent:
+                                            with open(fileDir,"wb+") as f:
+                                                f.write(JSONcontent)
+                                                f.close()
+                                            retry = 0
+                                        else:
+                                            time.sleep(1)
+                                            retry -= 1
+                                            logging.warning('Retry downloading missing details data for: %s', EPseries)
+                                    except urllib.error.URLError as e:
+                                        time.sleep(1)
+                                        retry -= 1
+                                        logging.warning('Retry downloading details data for: %s  -  %s', EPseries, e)
+                            if os.path.exists(fileDir):
+                                fileSize = os.path.getsize(fileDir)
+                                if fileSize > 0:
+                                    with open(fileDir, 'rb') as f:
+                                        EPdetails = json.loads(f.read())
+                                        f.close()
+                                    logging.info('Parsing %s', filename)
+                                    edict['epimage'] = EPdetails.get('seriesImage')
+                                    edict['epfan'] = EPdetails.get('backgroundImage')
+                                    EPgenres = EPdetails.get('seriesGenres')
+                                    if filename.startswith("MV"):
+                                        edict['epcredits'] = EPdetails['overviewTab'].get('cast')
+                                        EPgenres = 'Movie|' + EPgenres
+                                    edict['epgenres'] = EPgenres.split('|')
+                                    #edict['epstar'] = EPdetails.get('starRating')
+                                    EPlist = EPdetails['upcomingEpisodeTab']
+                                    EPid = edict['epid']
+                                    for airing in EPlist:
+                                        if EPid.lower() == airing['tmsID'].lower():
+                                            if not episode.startswith("MV"):
+                                                try:
+                                                    origDate = airing.get('originalAirDate')
+                                                    if origDate != '':
+                                                        EPoad = re.sub('Z', ':00Z', airing.get('originalAirDate'))
+                                                        edict['epoad'] = str(calendar.timegm(time.strptime(EPoad, '%Y-%m-%dT%H:%M:%SZ')))
+                                                except Exception as e:
+                                                    logging.exception('Could not parse oad for: %s - %s', episode, e)
+                                                try:
+                                                    TBAcheck = airing.get('episodeTitle')
+                                                    if TBAcheck != '':
+                                                        if "TBA" in TBAcheck:
+                                                            try:
+                                                                os.remove(fileDir)
+                                                                logging.info('Deleting %s due to TBA listings', filename)
+                                                                showList.remove(edict['epseries'])
+                                                            except OSError as e:
+                                                                logging.warning('Error Deleting: %s - %s.' % (e.filename, e.strerror))
+                                                except Exception as e:
+                                                    logging.exception('Could not parse TBAcheck for: %s - %s', episode, e)
+                                else:
+                                    logging.warning('Could not parse data for: %s - deleting file', filename)
+                                    os.remove(fileDir)
+                            else:
+                                logging.warning('Could not download details data for: %s - skipping episode', episode)
+                                failList.append(EPseries)
+                        except Exception as e:
+                            logging.exception('Could not parse data for: %s - deleting file  -  %s', episode, e)
+                            #os.remove(fileDir)
+        except Exception as e:
+            logging.exception('Exception: parseXdetails')
+
+    def addXDetails(edict):
+        try:
+            ratings = ""
+            date = ""
+            myear = ""
+            new = ""
+            live = ""
+            hd = ""
+            cc = ""
+            cast = ""
+            season = ""
+            epis = ""
+            episqts = ""
+            prog = ""
+            plot= ""
+            descsort = ""
+            bullet = "\u2022 "
+            hyphen = "\u2013 "
+            newLine = "\n"
+            space = " "
+            colon = "\u003A "
+            vbar = "\u007C "
+            slash = "\u2215 "
+            comma = "\u002C "
+
+            def getSortName(opt):
+                return {
+                    1: bullet,
+                    2: newLine,
+                    3: hyphen,
+                    4: space,
+                    5: colon,
+                    6: vbar,
+                    7: slash,
+                    8: comma,
+                    9: plot,
+                    10: new,
+                    11: hd,
+                    12: cc,
+                    13: season,
+                    14: ratings,
+                    15: date,
+                    16: prog,
+                    17: epis,
+                    18: episqts,
+                    19: cast,
+                    20: myear,
+                }.get(opt, None)
+
+            def cleanSortList(optList):
+                cleanList=[]
+                optLen = len(optList)
+                for opt in optList:
+                    thisOption = getSortName(int(opt))
+                    if thisOption:
+                        cleanList.append(int(opt))
+                for item in reversed(cleanList):
+                    if cleanList[-1] <= 8:
+                        del cleanList[-1]
+                return cleanList
+
+            def makeDescsortList(optList):
+                sortOrderList =[]
+                lastOption = 1
+                cleanedList = cleanSortList(optList)
+                for opt in cleanedList:
+                    thisOption = getSortName(int(opt))
+                    if int(opt) <= 8 and lastOption <= 8:
+                        if int(opt) == 2 and len(sortOrderList) > 1:
+                            del sortOrderList[-1]
+                            sortOrderList.append(thisOption)
+                        lastOption = int(opt)
+                    elif thisOption and lastOption:
+                        sortOrderList.append(thisOption)
+                        lastOption = int(opt)
+                    elif thisOption:
+                        lastOption = int(opt)
+                return sortOrderList
+
+            if edict['epoad'] is not None and int(edict['epoad']) > 0:
+                is_dst = time.daylight and time.localtime().tm_isdst > 0
+                TZoffset = (time.altzone if is_dst else time.timezone)
+                origDate = int(edict['epoad']) + TZoffset
+                finalDate = datetime.datetime.fromtimestamp(origDate).strftime('%Y-%m-%d')
+                finalDate = re.sub('%', ',', finalDate)
+                date = "Premiere: " + finalDate + space
+            if edict['epyear'] is not None:
+                myear = edict['epyear'] + space
+            if edict['eprating'] is not None:
+                ratings = edict['eprating'] + space
+            if edict['eptags'] != []:
+                tagsList = edict['eptags']
+                cc = ' | '.join(tagsList).upper() + space
+            #if edict['ephd'] is not None:
+                #hd = edict['ephd'] + space
+            if edict['epsn'] is not None and edict['epen'] is not None:
+                s = re.sub('S', '', edict['epsn'])
+                sf = "S" + str(int(s))
+                e = re.sub('E', '', edict['epen'])
+                ef = "E" + str(int(e))
+                season = sf + " - " + ef + space
+            if edict['epshow'] is not None:
+                prog = edict['epshow'] + space
+            if edict['eptitle'] is not None:
+                epis = edict['eptitle'] + space
+                episqts = '\"' + edict['eptitle'] + '\"' + space
+            if edict['epdesc'] is not None:
+                plot = edict['epdesc'] + space
+
+        # todo - handle star ratings
+
+            descsort = "".join(makeDescsortList(xdescOrder))
+            return descsort
+        except Exception as e:
+            logging.exception('Exception: addXdetails to description')
+
+
+    try:
+        if not os.path.exists(cacheDir):
+            os.mkdir(cacheDir)
+        count = 0
+        gridtime = gridtimeStart
+        if stationList is None:
+            logging.info('No channel list found - adding all stations!')
+        if tvhoff == 'true' and tvhmatch == 'true':
+            tvhMatchGet()
+        deleteOldCache(gridtimeStart)
+        while count < dayHours:
+            filename = str(int(gridtime)) + '.json.gz'
+            fileDir = os.path.join(cacheDir, filename)
+            if not os.path.exists(fileDir):
+                try:
+                    logging.info('Downloading guide data for: %i', int(gridtime))
+                    url = 'http://tvlistings.zap2it.com/api/grid?lineupId=&timespan=3&headendId=' + lineupcode + '&country=' + country + '&device=' + device + '&postalCode=' + zipcode + '&time=' + str(int(gridtime)) + '&pref=-&userId=-'
+                    saveContent = urllib.request.urlopen(url).read()
+                    savepage(fileDir, saveContent)
+                except:
+                    logging.warning('Could not download guide data for: %i', int(gridtime))
+                    logging.warning('URL: %s', url)
+            if os.path.exists(fileDir):
+                try:
+                    with gzip.open(fileDir, 'rb') as f:
+                        content = f.read()
+                        f.close()
+                    logging.info('Parsing %s', filename)
+                    if count == 0:
+                        parseStations(content)
+                    TBAcheck = parseEpisodes(content)
+                    if TBAcheck == "Unsafe":
+                        try:
+                            os.remove(fileDir)
+                            logging.info('Deleting %s due to TBA listings', filename)
+                        except OSError as e:
+                            logging.warning('Error Deleting: %s - %s.' % (e.filename, e.strerror))
+                except:
+                    logging.warning('JSON file error for: %s - deleting file', filename)
+                    os.remove(fileDir)
+            count += 1
+            gridtime = gridtime + 10800
+        showList = genShowList()
+        deleteOldShowCache(showList)
+        if xdetails == 'true':
+            parseXdetails()
+        xmltv()
+        timeRun = round((time.time() - pythonStartTime),2)
+        logging.info('zap2epg completed in %s seconds. ', timeRun)
+        logging.info('%s Stations and %s Episodes written to xmltv.xml file.', str(stationCount), str(episodeCount))
+        return timeRun, stationCount, episodeCount
+    except Exception as e:
+        logging.exception('Exception: main')
+
+if __name__ == '__main__':
+    userdata = os.getcwd()
+    log = os.path.join(userdata, os.environ.get('LogFile'))
+    logging.basicConfig(filename=log, filemode='w', format='%(asctime)s %(message)s', datefmt='%Y/%m/%d %H:%M:%S', level=logging.DEBUG)
+    mainRun(userdata)
+----EOF
+
+python3 -c "$script"
+}
+
+###
+### MAIN
+###
+
+# Create working directories
+[ ! -d $CacheDir ] && mkdir -p $CacheDir
+[ ! -d $LogDir ] && mkdir -p $LogDir
+
+while [ $# -gt 0 ]; do
+   case "$1" in
+      -d | --description )
+        printf "North America (tvlistings.zap2it.com using zap2epg)\n"
+        exit 0
+        ;;
+
+      -v | --version )
+        printf "3.0\n"
+        exit 0
+        ;;
+
+      -c | --capabilities )
+        printf "baseline\n"
+        exit 0
+        ;;
+
+      -q | --quiet )
+        Quiet="true"
+        ;;
+
+      -o | --output )
+        shift
+        XMLTV="$1"
+        ;;
+
+      -d | --days )
+        shift
+        Days="$1"
+        ;;
+
+      --offset )
+        shift
+        Offset="$1"
+        ;;
+
+      --config-file )
+        shift
+        ConfFile="$1"
+        ;;
+
+      --zip | --postal | --code )
+        shift
+        # Remove " " from postal code if any
+        ZipCode=$(echo ${1} | sed 's/ //g')
+        ;;
+
+      -* )
+        printf "unknown option: %s\n" "$1"
+        printf "Usage: %s: [--description] [--version] [--capabilities]\n" ${0##*/}
+        exit 2
+        ;;
+   esac
+   shift
+done
+
+# Check output path and ability to write
+if [[ ! -d $(dirname $XMLTV) ]]; then
+   echo "Output directory for [$(basename $XMLTV)] is inaccessible: $(dirname $XMLTV)"
+   exit 1
+elif [[ ! -w $(dirname $XMLTV) ]]; then
+   echo "Output directory for [$(basename $XMLTV)] is not write accessible: $(dirname $XMLTV)"
+   exit 1
+fi
+
+# Check that config file exists
+if [ ! -f $ConfFile ]; then
+   echo "Configuration file missing: $ConfFile"
+   exit 1
+fi
+
+# Check that offset parameter is either empty or match regex
+if [ "$Offset" ] && [[ ! "$Offset" =~ $DaysPattern ]]; then
+   echo "Parameter [--offset] unmatched: $Offset"
+   exit 1
+fi
+
+# Check that days parameter is either empty or match regex
+if [ "$Days" ] && [[ ! "$Days" =~ $DaysPattern ]]; then
+   echo "Parameter [--days] unmatched: $Days"
+   exit 1
+fi
+
+# Check that Zip & Postal codes are either empty or match regex
+if [ "$ZipCode" ] && [[ ! "$ZipCode" =~ $CACodePattern && ! "$ZipCode" =~ $USCodePattern ]]; then
+   echo "Parameter [--zip|--postal|--code] unmatched: $ZipCode"
+   exit 1
+fi
+
+# Make needed variable accessible to python
+export CacheDir
+export ConfFile
+export LogFile
+export XMLTV
+[ "$Days" ] && export Days
+[ "$Offset" ] && export Offset
+[ "$ZipCode" ] && export ZipCode
+
+# Generate XMLTV file
+zap2epg
+if [ $? = 0 ]; then
+  [ ! "$Quiet" == "true" ] && cat $XMLTV
+else
+  exit 1
+fi
+
+exit 0
