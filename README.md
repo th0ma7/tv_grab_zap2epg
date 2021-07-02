@@ -1,13 +1,13 @@
-# tv_grab_zap2epg - TVH (TVheadEnd) TV Grabber addon
+# tv_grab_zap2epg - tvheadend XMLTV Grabber
 North America (zap2epg using tvlistings.zap2it.com)
 
-`tv_grab_zap2epg` will generate an xmltv.xml file for USA/Canada TV lineups by fetching channel list of TVH and downloading relevant entries from tvlistings.zap2it.com.
+`tv_grab_zap2epg` will generate an `xmltv.xml` file for Canada/USA TV lineups by fetching channel list from tvheadend and downloading relevant entries from tvlistings.zap2it.com.
 
-_Note that zap2epg is a proof of concept and is for personal experimentation only. It is not meant to be used in a commercial product and its use is your own responsibiility._
-
-zap2epg was originally designed to be easily setup in Kodi for use as a grabber for tvheadend.  This is a fork of the original code from edit4ever Python3 branch of script.module.zap2epg based on my PR https://github.com/edit4ever/script.module.zap2epg/pull/37.
+zap2epg was originally designed to be easily setup in Kodi for use as a grabber for tvheadend.  This is a fork of the original code from edit4ever Python3 branch of script.module.zap2epg based on my PR https://github.com/edit4ever/script.module.zap2epg/pull/37 (much thanks for your great original work @edit4ever !!!)
 
 It includes the ability to automatically fetch your channel list from TVH to reduce the amount of data downloaded and speed up the grab. It has an option for downloading extra detail information for programs. (Note: this option will generate an extra http request per episode) It also has an option to append the extra detail information to the description (plot) field, which makes displaying this information in the Kodi EPG easier on many skins.
+
+_Note that zap2epg is a proof of concept and is for personal experimentation only. It is not meant to be used in a commercial product and its use is your own responsibiility._
 
 ## `tv_grab_zap2epg` capabilities
 zap2epg TV guide grabber script provides `baseline` capabilities (ref: http://wiki.xmltv.org/index.php/XmltvCapabilities):
@@ -32,12 +32,12 @@ It also provide the following "extra" capabilities:
 - `<setting id="xdesc">true</setting>`: Provide extra details to default TV show description
 - `<setting id="epgenre">3</setting>`: 
 - `<setting id="epicon">1</setting>`: 
-- `<setting id="tvhoff">false</setting>`: 
-- `<setting id="usern"></setting>`: Username to access TVH server
+- `<setting id="tvhoff">true</setting>`: true=fetch channel list from TVH server, false=do not fetch channel list
+- `<setting id="usern"></setting>`: Username to access TVH server, anonymous if both `usern` + `passw` are empty
 - `<setting id="passw"></setting>`: Password to access TVH server
 - `<setting id="tvhurl">127.0.0.1</setting>`: IP address to TVH server
 - `<setting id="tvhport">9981</setting>`: Port of TVH server
-- `<setting id="tvhmatch">false</setting>`: 
+- `<setting id="tvhmatch">true</setting>`: 
 - `<setting id="chmatch">true</setting>`: 
 
 ## TVheadEnd (TVH) auto-channel fetching
@@ -55,9 +55,10 @@ This feature is enabled by default using anonymous access.  You must have a `*` 
 It can be disabled by setting `<setting id="tvhoff">false</setting>`.  It can also be set to using another user account by filling in the `usern` and `passwd` fields.
 
 ## INSTALLATION: Synology DSM6/DSM7 TVH server:
-Already included in the SynoCommunity tvheadend package for DSM6-7 since  v4.3.20210612-29 (ref: https://synocommunity.com/package/tvheadend)
-File structure is as follow:
-**DSM7:**
+Already included in the SynoCommunity tvheadend package for DSM6-7 since  v4.3.20210612-29
+* https://synocommunity.com/package/tvheadend
+
+**DSM7** file structure:
 ```
 /var/packages/tvheadend/target/bin
 └── tv_grab_zap2epg
@@ -70,7 +71,7 @@ File structure is as follow:
 └── log 
     └── zap2epg.log
 ```
-**DSM6:**
+**DSM6** file structure:
 ```
 /var/packages/tvheadend/target/bin
 └── tv_grab_zap2epg
