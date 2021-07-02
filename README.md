@@ -44,7 +44,8 @@ It also provide the following "extra" capabilities:
 This feature is enabled by default using anonymous access.  You must have a `*` user defined in TVH with minimally:
 * Change parameters: `Rights`
 * Allowed networks: `127.0.0.1` or `0.0.0.0;::/0`
- using the following configuration:
+
+Using the following configuration:
 * `<setting id="tvhoff">true</setting>`
 * `<setting id="usern"></setting>`
 * `<setting id="passw"></setting>`
