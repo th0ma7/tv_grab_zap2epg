@@ -843,7 +843,7 @@ def mainRun(userdata):
                     logging.info('Downloading guide data for: %i', int(gridtime))
                     url = 'http://tvlistings.gracenote.com/api/grid?lineupId=&timespan=3&headendId=' + lineupcode + '&country=' + country + '&device=' + device + '&postalCode=' + zipcode + '&time=' + str(int(gridtime)) + '&pref=-&userId=-'
                     req = urllib.request.Request(url, data=None, headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.47 Safari/537.36'})
-                    saveContent = urllib.request.urlopen(url).read()
+                    saveContent = urllib.request.urlopen(req).read()
                     savepage(fileDir, saveContent)
                 except:
                     logging.warning('Could not download guide data for: %i', int(gridtime))
