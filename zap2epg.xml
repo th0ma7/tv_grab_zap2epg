@@ -18,6 +18,7 @@
   <setting id="tvhport">9981</setting>
   <setting id="tvhmatch">true</setting>
   <setting id="chmatch">true</setting>
+  <setting id="useragent">Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0</setting>
   <setting id="desc01">10</setting>
   <setting id="desc02">18</setting>
   <setting id="desc03">6</setting>
