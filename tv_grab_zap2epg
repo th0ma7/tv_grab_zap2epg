@@ -854,7 +854,7 @@ def mainRun(userdata):
             if not os.path.exists(fileDir):
                 try:
                     logging.info('Downloading guide data for: %i', int(gridtime))
-                    url = 'http://tvlistings.gracenote.com/api/grid?lineupId=&timespan=3&headendId=' + lineupcode + '&country=' + country + '&device=' + device + '&postalCode=' + zipcode + '&time=' + str(int(gridtime)) + '&pref=-&userId=-'
+                    url = 'http://tvlistings.gracenote.com/api/grid?aid=orbebb&lineupId=&timespan=3&headendId=' + lineupcode + '&country=' + country + '&device=' + device + '&postalCode=' + zipcode + '&time=' + str(int(gridtime)) + '&pref=-&userId=-'
                     req = urllib.request.Request(url, data=None, headers={'User-Agent': useragent})
                     saveContent = urllib.request.urlopen(req).read()
                     savepage(fileDir, saveContent)
