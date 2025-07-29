@@ -49,6 +49,31 @@ ZipCode=""
 Offset=""
 Days=""
 
+# Function to backup and clean configuration file
+clean_config_file() {
+    local config_file="$1"
+    local temp_file="${config_file}.tmp"
+    local backup_file="${config_file}.backup.$(date +%Y%m%d_%H%M%S)"
+
+    if [ -f "$config_file" ]; then
+        # Create backup
+        cp "$config_file" "$backup_file"
+        echo "Created backup: $backup_file" >&2
+
+        # Clean invalid entries and deprecated settings
+        sed -E '
+            # Remove desc01-desc20 entries
+            /<setting id="desc[0-9]{2}">/d
+            # Remove useragent entry (deprecated)
+            /<setting id="useragent">/d
+        ' "$config_file" > "$temp_file"
+
+        # Replace original with cleaned version
+        mv "$temp_file" "$config_file"
+        echo "Cleaned configuration file: removed deprecated entries" >&2
+    fi
+}
+
 zap2epg() {
 	read -r -d '' script <<-"----EOF"
 import urllib.request, urllib.error, urllib.parse
@@ -73,75 +98,155 @@ from requests.auth import HTTPDigestAuth
 
 def mainRun(userdata):
     settingsFile = os.path.join(userdata, os.environ.get('ConfFile'))
-    settings = ET.parse(settingsFile)
-    root = settings.getroot()
+    logging.info('Reading configuration from: %s', settingsFile)
+
+    try:
+        settings = ET.parse(settingsFile)
+        root = settings.getroot()
+    except Exception as e:
+        logging.error('Cannot parse configuration file %s: %s', settingsFile, e)
+        return None, None, None
+
     settingsDict = {}
     xdescOrderDict = {}
     logging.info('Running zap2epg-3.2')
     kodiVersion = root.attrib.get('version')
     logging.info('Kodi settings version: %s', kodiVersion)
+
     for setting in root.findall('setting'):
+        settingID = setting.get('id')
         if kodiVersion == '2':
             settingStr = setting.text
         else:
+            # For version 3, try the 'value' attribute first, then text
             settingStr = setting.get('value')
+            if settingStr is None:
+                settingStr = setting.text
             if settingStr == '':
                 settingStr = None
-        settingID = setting.get('id')
         settingsDict[settingID] = settingStr
+        logging.debug('Config setting: %s = %s (from %s)', settingID, settingStr, 'attribute' if setting.get('value') is not None else 'text')
+
+    # Initialize variables with default values to prevent None concatenation
+    stationList = None
+    zipcode = None
+    lineup = None
+    lineupcode = None
+    device = None
+    days = None
+    redays = None
+    xdetails = False
+    xdesc = False
+    epicon = None
+    epgenre = None
+    tvhoff = False
+    tvhurl = None
+    tvhport = None
+    usern = None
+    passw = None
+    chmatch = False
+    tvhmatch = False
+    stitle = False
+
+    # Helper function to parse boolean values
+    def parse_boolean(value):
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ('true', '1', 'yes', 'on')
+        return bool(value)
+
     for setting in settingsDict:
         if setting == 'slist':
             stationList = settingsDict[setting]
-        if setting == 'zipcode':
+        elif setting == 'zipcode':
             if "ZipCode" in os.environ:
                 zipcode = os.environ.get('ZipCode')
+                logging.info('Using zipcode from environment: %s', zipcode)
             else:
                 zipcode = settingsDict[setting]
-        if setting == 'lineup':
+                logging.info('Using zipcode from config: %s', zipcode)
+        elif setting == 'lineup':
             lineup = settingsDict[setting]
-        if setting == 'lineupcode':
+        elif setting == 'lineupcode':
             lineupcode = settingsDict[setting]
-        if setting == 'device':
+        elif setting == 'device':
             device = settingsDict[setting]
-        if setting == 'days':
+        elif setting == 'days':
             if "Days" in os.environ:
                 days = os.environ.get('Days')
             else:
                 days = settingsDict[setting]
-        if setting == 'redays':
+        elif setting == 'redays':
             redays = settingsDict[setting]
-        if setting == 'xdetails':
-            xdetails = settingsDict[setting]
-        if setting == 'xdesc':
-            xdesc = settingsDict[setting]
-        if setting == 'epicon':
+        elif setting == 'xdetails':
+            xdetails = parse_boolean(settingsDict[setting])
+            logging.debug('Parsed xdetails: %s -> %s', settingsDict[setting], xdetails)
+        elif setting == 'xdesc':
+            xdesc = parse_boolean(settingsDict[setting])
+            logging.debug('Parsed xdesc: %s -> %s', settingsDict[setting], xdesc)
+        elif setting == 'epicon':
             epicon = settingsDict[setting]
-        if setting == 'epgenre':
+        elif setting == 'epgenre':
             epgenre = settingsDict[setting]
-        if setting == 'tvhoff':
-            tvhoff = settingsDict[setting]
-        if setting == 'tvhurl':
+        elif setting == 'tvhoff':
+            tvhoff = parse_boolean(settingsDict[setting])
+            logging.debug('Parsed tvhoff: %s -> %s', settingsDict[setting], tvhoff)
+        elif setting == 'tvhurl':
             tvhurl = settingsDict[setting]
-        if setting == 'tvhport':
+        elif setting == 'tvhport':
             tvhport = settingsDict[setting]
-        if setting == 'usern':
+        elif setting == 'usern':
             usern = settingsDict[setting]
-        if setting == 'passw':
+        elif setting == 'passw':
             passw = settingsDict[setting]
-        if setting == 'chmatch':
-            chmatch = settingsDict[setting]
-        if setting == 'tvhmatch':
-            tvhmatch = settingsDict[setting]
-        if setting == 'useragent':
-            useragent = settingsDict[setting]
-        if setting == 'stitle':
-            stitle = settingsDict[setting]
-        if setting.startswith('desc'):
-            xdescOrderDict[setting] = (settingsDict[setting])
+        elif setting == 'chmatch':
+            chmatch = parse_boolean(settingsDict[setting])
+            logging.debug('Parsed chmatch: %s -> %s', settingsDict[setting], chmatch)
+        elif setting == 'tvhmatch':
+            tvhmatch = parse_boolean(settingsDict[setting])
+            logging.debug('Parsed tvhmatch: %s -> %s', settingsDict[setting], tvhmatch)
+        elif setting == 'stitle':
+            stitle = parse_boolean(settingsDict[setting])
+            logging.debug('Parsed stitle: %s -> %s', settingsDict[setting], stitle)
+        elif setting.startswith('desc'):
+            # Skip deprecated desc01-desc20 entries (they should be cleaned from config)
+            logging.warning('Found deprecated description setting: %s (will be ignored)', setting)
+        else:
+            logging.debug('Unknown configuration setting: %s = %s', setting, settingsDict[setting])
+
+    # Debug: Display all values read from configuration
+    logging.info('Configuration values read:')
+    logging.info('  zipcode: %s', zipcode)
+    logging.info('  lineup: %s', lineup)
+    logging.info('  xdetails: %s', xdetails)
+    logging.info('  xdesc: %s', xdesc)
+
+    # Validate required variables and set defaults
+    if not zipcode:
+        logging.error('Zipcode is required but not found in configuration')
+        logging.error('Available settings in config: %s', list(settingsDict.keys()))
+        # Display configuration file content for debugging
+        try:
+            with open(settingsFile, 'r') as f:
+                config_content = f.read()
+                logging.error('Configuration file content: %s', config_content)
+        except Exception as e:
+            logging.error('Cannot read config file: %s', e)
+        return None, None, None
+    if not lineupcode:
+        lineupcode = 'lineupId'  # Default value
+    if not device:
+        device = '-'  # Default value
+    if not days:
+        days = '1'  # Default value
+
     xdescOrder = [value for (key, value) in sorted(xdescOrderDict.items())]
     if lineupcode != 'lineupId':
-        chmatch = 'false'
-        tvhmatch = 'false'
+        chmatch = False
+        tvhmatch = False
     if zipcode.isdigit():
         country = 'USA'
         logging.info('\tCountry: United States of America [%s]', country)
@@ -160,6 +265,11 @@ def mainRun(userdata):
     cacheDir = os.path.join(userdata, os.environ.get('CacheDir'))
     schedule = {}
     tvhMatchDict = {}
+
+    # Debug: Log description parameters
+    logging.info('\tXdetails setting: %s', xdetails)
+    logging.info('\tXdesc setting: %s', xdesc)
+
     logging.info('\tTV Guide duration: %s days', days)
     if int(offset) > 1:
         logging.info('\tTV Guide Start: %i [offset: %i days]', int(gridtimeStart), int(offset))
@@ -171,25 +281,346 @@ def mainRun(userdata):
     logging.info('\tConfiguration file: %s', settingsFile)
     logging.info('\tCaching directory path: %s', cacheDir)
 
+    # =========================================================================
+    # SHARED CLASSES AND FUNCTIONS FOR OPTIMIZED DOWNLOADS
+    # =========================================================================
+
+    class OptimizedDownloader:
+        """Optimized download manager with WAF protection"""
+
+        def __init__(self, base_delay=1.0, min_delay=0.5):
+            self.session = None
+            self.user_agents = [
+                'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15'
+            ]
+            self.last_request_time = 0
+            self.base_delay = base_delay
+            self.min_delay = min_delay
+            self.current_delay = base_delay
+            self.consecutive_failures = 0
+            self.waf_blocks = 0
+            self.total_requests = 0
+            self.current_ua_index = 0
+
+        def init_session(self):
+            """Initialize optimized session with forced connection reuse"""
+            if self.session:
+                self.session.close()
+
+            self.session = requests.Session()
+
+            # Realistic headers with forced Keep-Alive
+            base_headers = {
+                'Accept': 'application/json, text/html, application/xhtml+xml, */*',
+                'Accept-Language': 'en-US,en;q=0.9,fr;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Keep-Alive': 'timeout=60, max=100',
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
+            }
+            self.session.headers.update(base_headers)
+
+            # Optimized configuration for connection reuse
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+
+            retry_strategy = Retry(
+                total=0,
+                backoff_factor=0,
+                status_forcelist=[]  # Don't auto-retry
+            )
+
+            # Optimized adapter with minimal connection pool
+            adapter = HTTPAdapter(
+                pool_connections=1,    # Single connection pool
+                pool_maxsize=1,        # Single connection in pool
+                max_retries=retry_strategy,
+                pool_block=True        # Block if pool full to force reuse
+            )
+
+            self.session.mount('https://', adapter)
+            self.session.mount('http://', adapter)
+
+            # Configuration urllib3 for persistence
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+            # Set initial User-Agent
+            self.rotate_user_agent()
+            logging.info('Optimized session initialized with persistent connections')
+            logging.debug('  Connection pooling: 1 connection max, keep-alive enabled')
+
+        def rotate_user_agent(self):
+            """Rotate User-Agent intelligently"""
+            self.current_ua_index = (self.current_ua_index + 1) % len(self.user_agents)
+            new_ua = self.user_agents[self.current_ua_index]
+            self.session.headers.update({'User-Agent': new_ua})
+            logging.debug('  User-Agent rotated: %s', new_ua[:50] + '...')
+
+        def adaptive_delay(self):
+            """Apply adaptive delay between requests"""
+            import random
+
+            # Calculate adaptive delay
+            if self.consecutive_failures > 2:
+                self.current_delay = min(self.base_delay * (1.5 ** self.consecutive_failures), 15.0)
+            elif self.consecutive_failures == 0:
+                self.current_delay = max(self.min_delay, self.current_delay * 0.95)
+
+            # Add random variation
+            delay = self.current_delay + random.uniform(-0.2, 0.5)
+            delay = max(self.min_delay, delay)
+
+            # Respect delay since last request
+            elapsed = time.time() - self.last_request_time
+            if elapsed < delay:
+                sleep_time = delay - elapsed
+                logging.debug('  Adaptive delay: %.2fs (failures: %d)', sleep_time, self.consecutive_failures)
+                time.sleep(sleep_time)
+
+            self.last_request_time = time.time()
+
+        def is_waf_blocked(self, response_text):
+            """Detect WAF blocking"""
+            waf_indicators = [
+                'Human Verification', 'captcha-container', 'AwsWafIntegration',
+                '403 Forbidden', 'Access Denied', 'challenge.js'
+            ]
+            return any(indicator in response_text for indicator in waf_indicators)
+
+        def handle_waf_block(self, extra_delay_range=(3, 8)):
+            """Handle WAF blocking with appropriate backoff"""
+            import random
+            self.waf_blocks += 1
+            self.consecutive_failures += 1
+            extra_delay = random.uniform(*extra_delay_range)
+            logging.warning('  WAF block detected, backing off %.1fs...', extra_delay)
+            time.sleep(extra_delay)
+            if self.total_requests % 10 == 0:  # Rotate occasionally after blocks
+                self.rotate_user_agent()
+
+        def download_with_retry_urllib(self, url, data=None, max_retries=3, timeout=None):
+            """Download using urllib (like original version) with intelligent retry and WAF handling"""
+            self.total_requests += 1
+
+            # Adaptive timeouts based on history
+            if timeout is None:
+                if self.consecutive_failures == 0:
+                    timeout = 6  # Fast if everything is OK
+                elif self.consecutive_failures == 1:
+                    timeout = 10  # Medium after 1 failure
+                else:
+                    timeout = 15  # Longer if repeated problems
+
+            # Periodic User-Agent rotation
+            if self.total_requests % 25 == 0:
+                self.rotate_user_agent()
+
+            for attempt in range(max_retries):
+                self.adaptive_delay()
+
+                current_timeout = timeout + (attempt * 2)  # Increase timeout on each retry
+                current_ua = self.user_agents[self.current_ua_index]
+
+                # Build display URL with parameters
+                if data:
+                    display_url = f'{url}?{data.decode("utf-8") if isinstance(data, bytes) else data}'
+                else:
+                    display_url = url
+
+                logging.debug('  Attempt %d/%d: %s (timeout: %ds)',
+                            attempt + 1, max_retries,
+                            display_url[:100] + '...' if len(display_url) > 100 else display_url,
+                            current_timeout)
+
+                try:
+                    # Use urllib exactly like the original working version
+                    import urllib.request
+                    URLcontent = urllib.request.Request(url, data=data, headers={'User-Agent': current_ua})
+                    JSONcontent = urllib.request.urlopen(URLcontent, timeout=current_timeout).read()
+
+                    if JSONcontent and len(JSONcontent) > 10:
+                        # Check that it's valid JSON
+                        try:
+                            json.loads(JSONcontent)
+                            self.consecutive_failures = max(0, self.consecutive_failures - 1)
+                            logging.debug('  Success: %d bytes received', len(JSONcontent))
+                            return JSONcontent
+                        except json.JSONDecodeError:
+                            logging.warning('  Invalid JSON received on attempt %d', attempt + 1)
+                            self.consecutive_failures += 1
+                    else:
+                        logging.warning('  Empty/small response on attempt %d: %d bytes',
+                                      attempt + 1, len(JSONcontent) if JSONcontent else 0)
+                        self.consecutive_failures += 1
+
+                except urllib.error.HTTPError as e:
+                    if e.code == 403:
+                        self.handle_waf_block()
+                        continue
+                    logging.warning('  HTTP Error %d on attempt %d: %s', e.code, attempt + 1, e.reason)
+                    if e.code in [404, 410]:
+                        break  # Don't retry for permanent errors
+                    self.consecutive_failures += 1
+
+                except urllib.error.URLError as e:
+                    logging.warning('  URL Error on attempt %d: %s', attempt + 1, str(e.reason))
+                    self.consecutive_failures += 1
+
+                except Exception as e:
+                    logging.warning('  Unexpected error on attempt %d: %s', attempt + 1, str(e))
+                    self.consecutive_failures += 1
+
+                # Wait before retry
+                if attempt < max_retries - 1:
+                    import random
+                    retry_delay = random.uniform(1, 3)
+                    time.sleep(retry_delay)
+
+            # All retries failed
+            logging.warning('  All %d attempts failed', max_retries)
+            return None
+
+        def download_with_retry(self, url, method='GET', data=None, max_retries=3, timeout=None):
+            """Download with intelligent retry, adaptive timeouts and WAF handling (for guide)"""
+            self.total_requests += 1
+
+            # Adaptive timeouts based on history
+            if timeout is None:
+                if self.consecutive_failures == 0:
+                    timeout = 6  # Fast if everything is OK
+                elif self.consecutive_failures == 1:
+                    timeout = 10  # Medium after 1 failure
+                else:
+                    timeout = 15  # Longer if repeated problems
+
+            # Periodic User-Agent rotation
+            if self.total_requests % 25 == 0:
+                self.rotate_user_agent()
+
+            for attempt in range(max_retries):
+                self.adaptive_delay()
+
+                current_timeout = timeout + (attempt * 2)  # Increase timeout on each retry
+
+                # Build display URL with parameters for POST
+                if method.upper() == 'POST' and data:
+                    display_url = f'{url}?{data}'
+                else:
+                    display_url = url
+
+                logging.debug('  Attempt %d/%d: %s (timeout: %ds)',
+                            attempt + 1, max_retries,
+                            display_url[:100] + '...' if len(display_url) > 100 else display_url,
+                            current_timeout)
+
+                try:
+                    if method.upper() == 'POST':
+                        response = self.session.post(url, data=data, timeout=current_timeout, allow_redirects=False)
+                    else:
+                        response = self.session.get(url, timeout=current_timeout, allow_redirects=False)
+
+                    # Check WAF blocking
+                    if response.status_code == 403:
+                        self.handle_waf_block()
+                        continue
+
+                    if self.is_waf_blocked(response.text):
+                        self.handle_waf_block((5, 12))  # Longer delay for CAPTCHA
+                        continue
+
+                    # Check response status
+                    if response.status_code == 200:
+                        self.consecutive_failures = max(0, self.consecutive_failures - 1)
+                        logging.debug('  Success: %d bytes received', len(response.content))
+                        return response.content
+                    else:
+                        logging.warning('  HTTP %d received', response.status_code)
+                        if response.status_code in [404, 410]:
+                            break  # Don't retry for permanent errors
+                        self.consecutive_failures += 1
+
+                except requests.exceptions.Timeout:
+                    logging.warning('  Timeout (%ds) on attempt %d', current_timeout, attempt + 1)
+                    self.consecutive_failures += 1
+
+                except requests.exceptions.ConnectionError as e:
+                    logging.warning('  Connection error on attempt %d: %s', attempt + 1, str(e))
+                    self.consecutive_failures += 1
+                    # Force reconnection on connection errors
+                    self.session.close()
+                    self.init_session()
+
+                except requests.exceptions.RequestException as e:
+                    logging.warning('  Request error on attempt %d: %s', attempt + 1, str(e))
+                    self.consecutive_failures += 1
+
+                # Wait before retry
+                if attempt < max_retries - 1:
+                    import random
+                    retry_delay = random.uniform(1, 3)
+                    time.sleep(retry_delay)
+
+            # All retries failed
+            logging.warning('  All %d attempts failed', max_retries)
+            return None
+
+        def close(self):
+            """Clean shutdown"""
+            if self.session:
+                self.session.close()
+                self.session = None
+
+        def get_stats(self):
+            """Get download statistics"""
+            return {
+                'total_requests': self.total_requests,
+                'waf_blocks': self.waf_blocks,
+                'consecutive_failures': self.consecutive_failures,
+                'current_delay': self.current_delay
+            }
+
+    # Create shared downloader instance
+    downloader = OptimizedDownloader(base_delay=0.8, min_delay=0.4)
+
+    # Configure urllib3 logging to reduce verbosity
+    import urllib3
+    urllib3.disable_warnings()
+    import logging as urllib_logging
+    urllib_logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+
+    downloader.init_session()
+
     def tvhMatchGet():
-        tvhUrlBase = 'http://' + tvhurl + ":" + tvhport
-        channels_url = tvhUrlBase + '/api/channel/grid?all=1&limit=999999999&sort=name&filter=[{"type":"boolean","value":true,"field":"enabled"}]'
-        if usern is not None and passw is not None:
-            logging.info('Tvheadend access using username and password...')
-            response = requests.get(channels_url, auth=HTTPDigestAuth(usern, passw))
-        else:
-            logging.info('Tvheadend anonymous access...')
-            response = requests.get(channels_url)
         try:
-            logging.info('Accessing Tvheadend channel list from: %s', tvhUrlBase)
-            channels = response.json()
-            for ch in channels['entries']:
-                channelName = ch['name']
-                channelNum = ch['number']
-                tvhMatchDict[channelNum] = channelName
-            logging.info('%s Tvheadend channels found...', str(len(tvhMatchDict)))
-        except urllib.error.HTTPError as e:
-            logging.exception('Exception: tvhMatch - %s', e.strerror)
+            tvhUrlBase = 'http://' + tvhurl + ":" + tvhport
+            channels_url = tvhUrlBase + '/api/channel/grid?all=1&limit=999999999&sort=name&filter=[{"type":"boolean","value":true,"field":"enabled"}]'
+            if usern is not None and passw is not None:
+                logging.info('Tvheadend access using username and password...')
+                response = requests.get(channels_url, auth=HTTPDigestAuth(usern, passw), timeout=5)
+            else:
+                logging.info('Tvheadend anonymous access...')
+                response = requests.get(channels_url, timeout=5)
+            if response.status_code == 200:
+                logging.info('Accessing Tvheadend channel list from: %s', tvhUrlBase)
+                channels = response.json()
+                for ch in channels['entries']:
+                    channelName = ch['name']
+                    channelNum = ch['number']
+                    tvhMatchDict[channelNum] = channelName
+                logging.info('%s Tvheadend channels found...', str(len(tvhMatchDict)))
+            else:
+                logging.warning('Tvheadend returned status code: %s', response.status_code)
+        except Exception as e:
+            logging.warning('Cannot connect to Tvheadend: %s', str(e))
+            logging.info('Continuing without Tvheadend channel matching...')
             pass
 
     def deleteOldCache(gridtimeStart):
@@ -232,6 +663,9 @@ def mainRun(userdata):
         return time.strftime("%Y%m%d%H%M%S",time.localtime(int(t)))
 
     def convHTML(data):
+        if data is None:
+            return ""
+        data = str(data)
         data = data.replace('&','&amp;')
         data = data.replace('"','&quot;')
         data = data.replace("'",'&apos;')
@@ -364,7 +798,7 @@ def mainRun(userdata):
                     fh.write('\t\t<display-name>' + xchnum + '</display-name>\n')
                 elif 'chfcc' in scheduleSort[station]:
                     xchnum = scheduleSort[station]['chfcc']
-                    fh.write('\t\t<display-name>' + convHTML(xcfcc) + '</display-name>\n')
+                    fh.write('\t\t<display-name>' + convHTML(xchfcc) + '</display-name>\n')
                 elif 'chnum' in scheduleSort[station]:
                     xchnum = scheduleSort[station]['chnum']
                     fh.write('\t\t<display-name>' + xchnum + '</display-name>\n')
@@ -378,10 +812,15 @@ def mainRun(userdata):
     def printEpisodes(fh):
         global episodeCount
         episodeCount = 0
+        desc_count = 0
+        xdesc_count = 0
         try:
             logging.info('Writing Episodes to xmltv.xml file...')
             if xdesc is True:
-                logging.info('Appending Xdetails to description for xmltv.xml file...')
+                logging.info('Extended descriptions enabled (xdesc=true)')
+            else:
+                logging.info('Using basic descriptions only (xdesc=false)')
+
             for station in schedule:
                 lang = 'en'
                 sdict = schedule[station]
@@ -400,18 +839,40 @@ def mainRun(userdata):
                                 if edict['epshow'] is not None:
                                     fh.write('\t\t<title lang=\"' + lang + '\">' + convHTML(edict['epshow']) + '</title>\n')
                                 if edict['eptitle'] is not None:
-                                    showTitle = convHTML(edict['epshow'])
-                                    if stitle == "true":
+                                    showTitle = convHTML(edict['eptitle'])
+                                    if stitle:
                                         safeTitle = re.sub('[\\/*?:|]', "_", showTitle)
-                                        fh.write('\t\t<title lang=\"' + lang + '\">' + safeTitle + '</title>\n')
+                                        fh.write('\t\t<sub-title lang=\"' + lang + '\">' + safeTitle + '</sub-title>\n')
                                     else:
-                                        fh.write('\t\t<title lang=\"' + lang + '\">' + showTitle + '</title>\n')
-                                if xdesc == 'true':
-                                    xdescSort = addXDetails(edict)
-                                    fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(xdescSort) + '</desc>\n')
-                                if xdesc == 'false':
-                                    if edict['epdesc'] is not None:
+                                        fh.write('\t\t<sub-title lang=\"' + lang + '\">' + showTitle + '</sub-title>\n')
+
+                                # MAJOR FIX: Logic for descriptions with proper fallback
+                                description_written = False
+
+                                # Try extended descriptions first if enabled
+                                if xdesc is True:
+                                    try:
+                                        xdescSort = addXDetails(edict)
+                                        if xdescSort is not None and xdescSort.strip():
+                                            fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(xdescSort) + '</desc>\n')
+                                            xdesc_count += 1
+                                            description_written = True
+                                    except Exception as e:
+                                        logging.warning('Error generating extended description for episode %s: %s', episode, str(e))
+
+                                # Fallback to basic description if no extended description was written
+                                if not description_written:
+                                    if edict.get('epdesc') is not None and str(edict['epdesc']).strip():
                                         fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(edict['epdesc']) + '</desc>\n')
+                                        desc_count += 1
+                                        description_written = True
+
+                                # Debug: count episodes without description
+                                if not description_written:
+                                    logging.warning('No description available for: %s - %s',
+                                                  edict.get('epshow', 'Unknown'),
+                                                  edict.get('eptitle', ''))
+
                                 if edict['eplength'] is not None:
                                     fh.write('\t\t<length units="minutes">' + edict['eplength'] + '</length>\n')
                                 if edict['epsn'] is not None and edict['epen'] is not None:
@@ -473,10 +934,11 @@ def mainRun(userdata):
                                 fh.write("\t</programme>\n")
                                 episodeCount += 1
                         except Exception as e:
-                            logging.exception('No data for episode %s:', episode)
-                            #fn = os.path.join(cacheDir, episode + '.json')
-                            #os.remove(fn)
-                            #logging.info('Deleting episode %s:', episode)
+                            logging.exception('Error processing episode %s:', episode)
+
+            # Log description statistics
+            logging.info('Description statistics: Episodes=%d, Basic_desc=%d, Extended_desc=%d',
+                        episodeCount, desc_count, xdesc_count)
         except Exception as e:
             logging.exception('Exception: printEpisodes')
 
@@ -507,7 +969,7 @@ def mainRun(userdata):
                         schedule[skey]['chnam'] = chName
                         schedule[skey]['chicon'] = station.get('thumbnail').split('?')[0]
                         chnumStart = station.get('channelNo')
-                        if '.' not in chnumStart and chmatch == 'true' and chSign is not None:
+                        if '.' not in chnumStart and chmatch and chSign is not None:
                             chsub = re.search(r'(\d+)$', chSign)
                             if chsub is not None:
                                 chnumUpdate = chnumStart + '.' + chsub.group(0)
@@ -516,7 +978,7 @@ def mainRun(userdata):
                         else:
                             chnumUpdate = chnumStart
                         schedule[skey]['chnum'] = chnumUpdate
-                        if tvhmatch == 'true' and '.' in chnumUpdate:
+                        if tvhmatch and '.' in chnumUpdate:
                             if chnumUpdate in tvhMatchDict:
                                 schedule[skey]['chtvh'] = tvhMatchDict[chnumUpdate]
                             else:
@@ -529,7 +991,7 @@ def mainRun(userdata):
                     schedule[skey]['chnam'] = chName
                     schedule[skey]['chicon'] = station.get('thumbnail').split('?')[0]
                     chnumStart = station.get('channelNo')
-                    if '.' not in chnumStart and chmatch == 'true' and chSign is not None:
+                    if '.' not in chnumStart and chmatch and chSign is not None:
                         chsub = re.search(r'(\d+)$', chSign)
                         if chsub is not None:
                             chnumUpdate = chnumStart + '.' + chsub.group(0)
@@ -538,7 +1000,7 @@ def mainRun(userdata):
                     else:
                         chnumUpdate = chnumStart
                     schedule[skey]['chnum'] = chnumUpdate
-                    if tvhmatch == 'true' and '.' in chnumUpdate:
+                    if tvhmatch and '.' in chnumUpdate:
                         if chnumUpdate in tvhMatchDict:
                             schedule[skey]['chtvh'] = tvhMatchDict[chnumUpdate]
                         else:
@@ -558,13 +1020,31 @@ def mainRun(userdata):
                         for episode in episodes:
                             epkey = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
                             schedule[skey][epkey] = {}
+
+                            # CRITICAL FIX: improved description retrieval
+                            program = episode.get('program', {})
+                            shortDesc = program.get('shortDesc') or ''
+                            longDesc = program.get('longDesc') or ''
+
+                            # Handle None values properly
+                            if shortDesc is None:
+                                shortDesc = ''
+                            if longDesc is None:
+                                longDesc = ''
+
+                            # Debug: log if no description found
+                            if not shortDesc and not longDesc:
+                                logging.debug('No description found for: %s - %s',
+                                            program.get('title', 'Unknown'),
+                                            program.get('episodeTitle', ''))
+
                             schedule[skey][epkey]['epid'] = episode['program'].get('tmsId')
                             schedule[skey][epkey]['epstart'] = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
                             schedule[skey][epkey]['epend'] = str(calendar.timegm(time.strptime(episode.get('endTime'), '%Y-%m-%dT%H:%M:%SZ')))
                             schedule[skey][epkey]['eplength'] = episode.get('duration')
                             schedule[skey][epkey]['epshow'] = episode['program'].get('title')
                             schedule[skey][epkey]['eptitle'] = episode['program'].get('episodeTitle')
-                            schedule[skey][epkey]['epdesc'] = episode['program'].get('shortDesc')
+                            schedule[skey][epkey]['epdesc'] = longDesc if longDesc else shortDesc  # Fix: priority to longDesc
                             schedule[skey][epkey]['epyear'] = episode['program'].get('releaseYear')
                             schedule[skey][epkey]['eprating'] = episode.get('rating')
                             schedule[skey][epkey]['epflag'] = episode.get('flag')
@@ -578,7 +1058,7 @@ def mainRun(userdata):
                             schedule[skey][epkey]['epgenres'] = None
                             schedule[skey][epkey]['epcredits'] = None
                             schedule[skey][epkey]['epxdesc'] = None
-                            schedule[skey][epkey]['epseries'] = episode.get('seriesId')
+                            schedule[skey][epkey]['epseries'] = episode['program'].get('seriesId')  # CRITICAL FIX: seriesId is in program
                             schedule[skey][epkey]['epimage'] = None
                             schedule[skey][epkey]['epfan'] = None
                             if "TBA" in schedule[skey][epkey]['epshow']:
@@ -591,13 +1071,25 @@ def mainRun(userdata):
                     for episode in episodes:
                         epkey = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
                         schedule[skey][epkey] = {}
+
+                        # CRITICAL FIX: improved description retrieval
+                        program = episode.get('program', {})
+                        shortDesc = program.get('shortDesc') or ''
+                        longDesc = program.get('longDesc') or ''
+
+                        # Handle None values properly
+                        if shortDesc is None:
+                            shortDesc = ''
+                        if longDesc is None:
+                            longDesc = ''
+
                         schedule[skey][epkey]['epid'] = episode['program'].get('tmsId')
                         schedule[skey][epkey]['epstart'] = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
                         schedule[skey][epkey]['epend'] = str(calendar.timegm(time.strptime(episode.get('endTime'), '%Y-%m-%dT%H:%M:%SZ')))
                         schedule[skey][epkey]['eplength'] = episode.get('duration')
                         schedule[skey][epkey]['epshow'] = episode['program'].get('title')
                         schedule[skey][epkey]['eptitle'] = episode['program'].get('episodeTitle')
-                        schedule[skey][epkey]['epdesc'] = episode['program'].get('shortDesc')
+                        schedule[skey][epkey]['epdesc'] = longDesc if longDesc else shortDesc  # Fix: priority to longDesc
                         schedule[skey][epkey]['epyear'] = episode['program'].get('releaseYear')
                         schedule[skey][epkey]['eprating'] = episode.get('rating')
                         schedule[skey][epkey]['epflag'] = episode.get('flag')
@@ -611,7 +1103,7 @@ def mainRun(userdata):
                         schedule[skey][epkey]['epgenres'] = None
                         schedule[skey][epkey]['epcredits'] = None
                         schedule[skey][epkey]['epxdesc'] = None
-                        schedule[skey][epkey]['epseries'] = episode.get('seriesId')
+                        schedule[skey][epkey]['epseries'] = episode['program'].get('seriesId')  # CRITICAL FIX: seriesId is in program
                         schedule[skey][epkey]['epimage'] = None
                         schedule[skey][epkey]['epfan'] = None
                         if "TBA" in schedule[skey][epkey]['epshow']:
@@ -630,96 +1122,161 @@ def mainRun(userdata):
             for episode in sdict:
                 if not episode.startswith("ch"):
                     edict = sdict[episode]
-                    showList.append(edict['epseries'])
+                    if edict.get('epseries'):
+                        showList.append(edict['epseries'])
         return showList
 
     def parseXdetails():
         showList = []
         failList = []
+        download_count = 0
+        success_count = 0
+
+        logging.info('Starting extended details download using optimized session')
+
         try:
             for station in schedule:
                 sdict = schedule[station]
                 for episode in sdict:
                     if not episode.startswith("ch"):
                         edict = sdict[episode]
-                        EPseries = edict['epseries']
-                        showList.append(edict['epseries'])
+                        EPseries = edict.get('epseries')
+
+                        # Check that EPseries is not None or empty
+                        if not EPseries or EPseries in failList:
+                            continue
+
+                        showList.append(EPseries)
                         filename = EPseries + '.json'
                         fileDir = os.path.join(cacheDir, filename)
+
                         try:
-                            if not os.path.exists(fileDir) and EPseries not in failList:
-                                retry = 3
-                                while retry > 0:
-                                    logging.info('Downloading details data for: %s', EPseries)
-                                    url = 'https://tvlistings.gracenote.com/api/program/overviewDetails'
-                                    data = 'programSeriesID=' + EPseries
-                                    data_encode = data.encode('utf-8')
+                            if not os.path.exists(fileDir):
+                                download_count += 1
+
+                                url = 'https://tvlistings.gracenote.com/api/program/overviewDetails'
+                                data = 'programSeriesID=' + EPseries
+
+                                # Display complete URL with parameters for debug (as before)
+                                full_url_display = f'{url}?{data}'
+                                logging.info('Downloading details data for: %s', EPseries)
+                                logging.debug('  URL: %s', full_url_display)
+
+                                # FIX: Use exactly the same method as the working original version
+                                # Encode data like in the original version
+                                data_encode = data.encode('utf-8')
+
+                                # Use optimized downloader with correct parameters
+                                content = downloader.download_with_retry_urllib(url, data=data_encode, timeout=6)
+
+                                if content:
                                     try:
-                                        URLcontent = urllib.request.Request(url, data=data_encode, headers={'User-Agent': useragent})
-                                        JSONcontent = urllib.request.urlopen(URLcontent).read()
-                                        if JSONcontent:
-                                            with open(fileDir,"wb+") as f:
-                                                f.write(JSONcontent)
-                                                f.close()
-                                            retry = 0
-                                        else:
-                                            time.sleep(1)
-                                            retry -= 1
-                                            logging.warning('Retry downloading missing details data for: %s', EPseries)
-                                    except urllib.error.URLError as e:
-                                        time.sleep(1)
-                                        retry -= 1
-                                        logging.warning('Retry downloading details data for: %s  -  %s', EPseries, e)
+                                        # Check that it's valid JSON
+                                        json.loads(content)
+                                        # Save file
+                                        with open(fileDir, "wb") as f:
+                                            f.write(content)
+                                        logging.info('  Successfully downloaded: %s (%d bytes)', filename, len(content))
+                                        success_count += 1
+                                    except json.JSONDecodeError:
+                                        logging.warning('  Invalid JSON received for: %s', EPseries)
+                                        failList.append(EPseries)
+                                    except Exception as e:
+                                        logging.warning('  Error saving details %s: %s', filename, str(e))
+                                        failList.append(EPseries)
+                                else:
+                                    logging.warning('  Failed to download details for: %s', EPseries)
+                                    failList.append(EPseries)
+
+                            # Parse downloaded or cached file
                             if os.path.exists(fileDir):
                                 fileSize = os.path.getsize(fileDir)
                                 if fileSize > 0:
-                                    with open(fileDir, 'rb') as f:
-                                        EPdetails = json.loads(f.read())
-                                        f.close()
-                                    logging.info('Parsing %s', filename)
-                                    edict['epimage'] = EPdetails.get('seriesImage')
-                                    edict['epfan'] = EPdetails.get('backgroundImage')
-                                    EPgenres = EPdetails.get('seriesGenres')
-                                    if filename.startswith("MV"):
-                                        edict['epcredits'] = EPdetails['overviewTab'].get('cast')
-                                        EPgenres = 'Movie|' + EPgenres
-                                    edict['epgenres'] = EPgenres.split('|')
-                                    #edict['epstar'] = EPdetails.get('starRating')
-                                    EPlist = EPdetails['upcomingEpisodeTab']
-                                    EPid = edict['epid']
-                                    for airing in EPlist:
-                                        if EPid.lower() == airing['tmsID'].lower():
-                                            if not episode.startswith("MV"):
-                                                try:
-                                                    origDate = airing.get('originalAirDate')
-                                                    if origDate != '':
-                                                        EPoad = re.sub('Z', ':00Z', airing.get('originalAirDate'))
-                                                        edict['epoad'] = str(calendar.timegm(time.strptime(EPoad, '%Y-%m-%dT%H:%M:%SZ')))
-                                                except Exception as e:
-                                                    logging.exception('Could not parse oad for: %s - %s', episode, e)
-                                                try:
-                                                    TBAcheck = airing.get('episodeTitle')
-                                                    if TBAcheck != '':
-                                                        if "TBA" in TBAcheck:
+                                    try:
+                                        with open(fileDir, 'rb') as f:
+                                            EPdetails = json.loads(f.read())
+
+                                        logging.debug('Parsing %s (%d bytes)', filename, fileSize)
+
+                                        # Process details (existing code)
+                                        edict['epimage'] = EPdetails.get('seriesImage')
+                                        edict['epfan'] = EPdetails.get('backgroundImage')
+                                        EPgenres = EPdetails.get('seriesGenres')
+
+                                        if filename.startswith("MV"):
+                                            overview_tab = EPdetails.get('overviewTab', {})
+                                            if isinstance(overview_tab, dict):
+                                                edict['epcredits'] = overview_tab.get('cast')
+                                            EPgenres = 'Movie|' + EPgenres if EPgenres else 'Movie'
+
+                                        if EPgenres:
+                                            edict['epgenres'] = EPgenres.split('|')
+
+                                        EPlist = EPdetails.get('upcomingEpisodeTab', [])
+                                        if not isinstance(EPlist, list):
+                                            EPlist = []
+
+                                        EPid = edict.get('epid', '')
+                                        for airing in EPlist:
+                                            if not isinstance(airing, dict):
+                                                continue
+
+                                            if EPid.lower() == airing.get('tmsID', '').lower():
+                                                if not episode.startswith("MV"):
+                                                    try:
+                                                        origDate = airing.get('originalAirDate')
+                                                        if origDate and origDate != '':
+                                                            EPoad = re.sub('Z', ':00Z', origDate)
+                                                            edict['epoad'] = str(calendar.timegm(time.strptime(EPoad, '%Y-%m-%dT%H:%M:%SZ')))
+                                                    except Exception:
+                                                        pass # Ignore date parsing errors
+
+                                                    try:
+                                                        TBAcheck = airing.get('episodeTitle', '')
+                                                        if TBAcheck and "TBA" in TBAcheck:
                                                             try:
                                                                 os.remove(fileDir)
-                                                                logging.info('Deleting %s due to TBA listings', filename)
-                                                                showList.remove(edict['epseries'])
-                                                            except OSError as e:
-                                                                logging.warning('Error Deleting: %s - %s.' % (e.filename, e.strerror))
-                                                except Exception as e:
-                                                    logging.exception('Could not parse TBAcheck for: %s - %s', episode, e)
+                                                                logging.info('  Deleted %s (TBA listing)', filename)
+                                                                if EPseries in showList:
+                                                                    showList.remove(EPseries)
+                                                            except OSError:
+                                                                pass
+                                                    except Exception:
+                                                        pass
+
+                                    except json.JSONDecodeError:
+                                        logging.warning('  Invalid JSON in cached file: %s - deleting', filename)
+                                        try:
+                                            os.remove(fileDir)
+                                        except:
+                                            pass
+                                    except Exception as e:
+                                        logging.warning('  Error parsing cached file %s: %s', filename, str(e))
+
                                 else:
-                                    logging.warning('Could not parse data for: %s - deleting file', filename)
-                                    os.remove(fileDir)
-                            else:
-                                logging.warning('Could not download details data for: %s - skipping episode', episode)
-                                failList.append(EPseries)
+                                    logging.warning('  Empty cached file: %s - deleting', filename)
+                                    try:
+                                        os.remove(fileDir)
+                                    except:
+                                        pass
+
                         except Exception as e:
-                            logging.exception('Could not parse data for: %s - deleting file  -  %s', episode, e)
-                            #os.remove(fileDir)
+                            logging.warning('  Critical error processing %s: %s', episode, str(e))
+
+            # Final statistics
+            stats = downloader.get_stats()
+            logging.info('Extended details download completed:')
+            logging.info('  Downloads attempted: %d', download_count)
+            logging.info('  Successful downloads: %d', success_count)
+            logging.info('  Failed downloads: %d', len(failList))
+            logging.info('  WAF blocks during details: %d', stats['waf_blocks'])
+            logging.info('  Success rate: %.1f%%', (success_count/download_count*100) if download_count > 0 else 0)
+
+            if failList:
+                logging.info('  Failed series (first 10): %s', ', '.join(failList[:10]))
+
         except Exception as e:
-            logging.exception('Exception: parseXdetails')
+            logging.error('Critical error in parseXdetails: %s', str(e))
 
     def addXDetails(edict):
         try:
@@ -774,11 +1331,12 @@ def mainRun(userdata):
                 cleanList=[]
                 optLen = len(optList)
                 for opt in optList:
-                    thisOption = getSortName(int(opt))
-                    if thisOption:
-                        cleanList.append(int(opt))
+                    if opt is not None and str(opt).isdigit():
+                        thisOption = getSortName(int(opt))
+                        if thisOption is not None:
+                            cleanList.append(int(opt))
                 for item in reversed(cleanList):
-                    if cleanList[-1] <= 8:
+                    if cleanList and cleanList[-1] <= 8:
                         del cleanList[-1]
                 return cleanList
 
@@ -800,43 +1358,51 @@ def mainRun(userdata):
                         lastOption = int(opt)
                 return sortOrderList
 
-            if edict['epoad'] is not None and int(edict['epoad']) > 0:
+            if edict.get('epoad') is not None and int(edict['epoad']) > 0:
                 is_dst = time.daylight and time.localtime().tm_isdst > 0
                 TZoffset = (time.altzone if is_dst else time.timezone)
                 origDate = int(edict['epoad']) + TZoffset
                 finalDate = datetime.datetime.fromtimestamp(origDate).strftime('%Y-%m-%d')
                 finalDate = re.sub('%', ',', finalDate)
                 date = "Premiere: " + finalDate + space
-            if edict['epyear'] is not None:
-                myear = edict['epyear'] + space
-            if edict['eprating'] is not None:
-                ratings = edict['eprating'] + space
-            if edict['eptags'] != []:
+            if edict.get('epyear') is not None:
+                myear = str(edict['epyear']) + space
+            if edict.get('eprating') is not None:
+                ratings = str(edict['eprating']) + space
+            if edict.get('eptags') and edict['eptags'] != []:
                 tagsList = edict['eptags']
                 cc = ' | '.join(tagsList).upper() + space
             #if edict['ephd'] is not None:
                 #hd = edict['ephd'] + space
-            if edict['epsn'] is not None and edict['epen'] is not None:
-                s = re.sub('S', '', edict['epsn'])
+            if edict.get('epsn') is not None and edict.get('epen') is not None:
+                s = re.sub('S', '', str(edict['epsn']))
                 sf = "S" + str(int(s))
-                e = re.sub('E', '', edict['epen'])
+                e = re.sub('E', '', str(edict['epen']))
                 ef = "E" + str(int(e))
                 season = sf + " - " + ef + space
-            if edict['epshow'] is not None:
-                prog = edict['epshow'] + space
-            if edict['eptitle'] is not None:
-                epis = edict['eptitle'] + space
-                episqts = '\"' + edict['eptitle'] + '\"' + space
-            if edict['epdesc'] is not None:
-                plot = edict['epdesc'] + space
+            if edict.get('epshow') is not None:
+                prog = str(edict['epshow']) + space
+            if edict.get('eptitle') is not None:
+                epis = str(edict['eptitle']) + space
+                episqts = '\"' + str(edict['eptitle']) + '\"' + space
+            if edict.get('epdesc') is not None:
+                plot = str(edict['epdesc']) + space
 
-        # todo - handle star ratings
+            # todo - handle star ratings
 
-            descsort = "".join(makeDescsortList(xdescOrder))
-            return descsort
+            # Only create extended description if we have xdescOrder configuration
+            if xdescOrder and len(xdescOrder) > 0:
+                descsort = "".join(makeDescsortList(xdescOrder))
+                # Return extended description only if it's different from basic description
+                if descsort.strip() and descsort.strip() != plot.strip():
+                    return descsort
+
+            # Return None to indicate no extended description available (fallback to basic)
+            return None
         except Exception as e:
             logging.exception('Exception: addXdetails to description')
-
+            # In case of error, return None to trigger fallback to basic description
+            return None
 
     try:
         if not os.path.exists(cacheDir):
@@ -845,22 +1411,47 @@ def mainRun(userdata):
         gridtime = gridtimeStart
         if stationList is None:
             logging.info('No channel list found - adding all stations!')
-        if tvhoff == 'true' and tvhmatch == 'true':
+        if tvhoff and tvhmatch:
             tvhMatchGet()
         deleteOldCache(gridtimeStart)
+
+        # OPTIMIZED MAIN GUIDE DOWNLOAD
+        logging.info('Starting main guide download with optimized session')
+        guide_download_start = time.time()
+
         while count < dayHours:
             filename = str(int(gridtime)) + '.json.gz'
             fileDir = os.path.join(cacheDir, filename)
+
             if not os.path.exists(fileDir):
-                try:
-                    logging.info('Downloading guide data for: %i', int(gridtime))
-                    url = 'http://tvlistings.gracenote.com/api/grid?aid=orbebb&TMSID=&AffiliateID=lat&FromPage=TV%20Grid&lineupId=&timespan=3&headendId=' + lineupcode + '&country=' + country + '&device=' + device + '&postalCode=' + zipcode + '&time=' + str(int(gridtime)) + '&isOverride=true&pref=-&userId=-'
-                    req = urllib.request.Request(url, data=None, headers={'User-Agent': useragent})
-                    saveContent = urllib.request.urlopen(req).read()
-                    savepage(fileDir, saveContent)
-                except:
-                    logging.warning('Could not download guide data for: %i', int(gridtime))
-                    logging.warning('URL: %s', url)
+                # Build download URL
+                url = ('http://tvlistings.gracenote.com/api/grid?aid=orbebb&TMSID=&AffiliateID=lat&FromPage=TV%20Grid&lineupId=&timespan=3&headendId=' +
+                       str(lineupcode) + '&country=' + str(country) + '&device=' + str(device) + '&postalCode=' +
+                       str(zipcode) + '&time=' + str(int(gridtime)) + '&isOverride=true&pref=-&userId=-')
+
+                logging.info('Downloading guide data for: %i (%s)', int(gridtime), filename)
+                logging.debug('  URL: %s', url)
+
+                # Use optimized downloader
+                content = downloader.download_with_retry(url, method='GET', timeout=8)  # Shorter timeout for guide
+
+                if content:
+                    try:
+                        # Check that it's valid JSON
+                        json.loads(content)
+                        # Save in gzip format
+                        savepage(filename, content)
+                        logging.info('  Successfully downloaded guide: %s (%d bytes)', filename, len(content))
+                    except json.JSONDecodeError:
+                        logging.warning('  Invalid JSON received for guide time: %i', int(gridtime))
+                    except Exception as e:
+                        logging.warning('  Error saving guide %s: %s', filename, str(e))
+                else:
+                    logging.warning('  Failed to download guide data for: %i', int(gridtime))
+            else:
+                logging.debug('Using cached guide: %s', filename)
+
+            # Parse downloaded or cached file
             if os.path.exists(fileDir):
                 try:
                     with gzip.open(fileDir, 'rb') as f:
@@ -876,28 +1467,57 @@ def mainRun(userdata):
                             logging.info('Deleting %s due to TBA listings', filename)
                         except OSError as e:
                             logging.warning('Error Deleting: %s - %s.' % (e.filename, e.strerror))
-                except:
+                except Exception as e:
                     logging.warning('JSON file error for: %s - deleting file', filename)
-                    os.remove(fileDir)
+                    try:
+                        os.remove(fileDir)
+                    except:
+                        pass
             count += 1
             gridtime = gridtime + 10800
+
+        guide_download_time = time.time() - guide_download_start
+        stats = downloader.get_stats()
+        logging.info('Main guide download completed in %.1fs', guide_download_time)
+        logging.info('  Guide requests: %d, WAF blocks: %d', count, stats['waf_blocks'])
+
         showList = genShowList()
         deleteOldShowCache(showList)
-        if xdetails == 'true':
+        if xdetails is True:
+            logging.info('Extended details enabled - downloading additional program information')
             parseXdetails()
+        else:
+            logging.info('Extended details disabled - using basic program information only')
         xmltv()
         timeRun = round((time.time() - pythonStartTime),2)
         logging.info('zap2epg completed in %s seconds. ', timeRun)
         logging.info('%s Stations and %s Episodes written to xmltv.xml file.', str(stationCount), str(episodeCount))
+
+        # Final downloader statistics
+        final_stats = downloader.get_stats()
+        logging.info('Final download statistics:')
+        logging.info('  Total requests: %d', final_stats['total_requests'])
+        logging.info('  WAF blocks encountered: %d', final_stats['waf_blocks'])
+        logging.info('  Final delay: %.2fs', final_stats['current_delay'])
+
         return timeRun, stationCount, episodeCount
     except Exception as e:
         logging.exception('Exception: main')
+    finally:
+        # Clean downloader shutdown
+        downloader.close()
 
 if __name__ == '__main__':
     userdata = os.getcwd()
     log = os.path.join(userdata, os.environ.get('LogFile'))
     logging.basicConfig(filename=log, filemode='w', format='%(asctime)s %(message)s', datefmt='%Y/%m/%d %H:%M:%S', level=logging.DEBUG)
-    mainRun(userdata)
+    result = mainRun(userdata)
+    if result is None or result == (None, None, None):
+        logging.error('Script failed - exiting with error code')
+        sys.exit(1)
+    else:
+        logging.info('Script completed successfully')
+        sys.exit(0)
 ----EOF
 
 python3 -c "$script"
@@ -912,12 +1532,16 @@ python3 -c "$script"
 [ ! -d $LogDir ] && mkdir -m 755 -p $LogDir
 [ ! -d $ConfDir ] && mkdir -m 755 -p $ConfDir
 
-# if configuration file doesn't exit
-# create one by default
+# Clean configuration file if it exists
+if [ -f "$ConfFile" ]; then
+    clean_config_file "$ConfFile"
+fi
+
+# if configuration file doesn't exist
+# create one by default (cleaned version)
 if [ ! -f "$ConfFile" ]; then
 read -r -d '' config <<-"----EOF"
 <settings version="3">
-  <setting id="useragent">Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0</setting>
   <setting id="zipcode">92101</setting>
   <setting id="lineupcode">lineupId</setting>
   <setting id="lineup">Local Over the Air Broadcast</setting>
@@ -937,26 +1561,6 @@ read -r -d '' config <<-"----EOF"
   <setting id="tvhport">9981</setting>
   <setting id="tvhmatch">true</setting>
   <setting id="chmatch">true</setting>
-  <setting id="desc01">10</setting>
-  <setting id="desc02">18</setting>
-  <setting id="desc03">6</setting>
-  <setting id="desc04">13</setting>
-  <setting id="desc05">6</setting>
-  <setting id="desc06">15</setting>
-  <setting id="desc07">2</setting>
-  <setting id="desc08">9</setting>
-  <setting id="desc09">2</setting>
-  <setting id="desc10">14</setting>
-  <setting id="desc11">6</setting>
-  <setting id="desc12">11</setting>
-  <setting id="desc13">6</setting>
-  <setting id="desc14">12</setting>
-  <setting id="desc15">6</setting>
-  <setting id="desc16">20</setting>
-  <setting id="desc17">6</setting>
-  <setting id="desc18">19</setting>
-  <setting id="desc19">0</setting>
-  <setting id="desc20">0</setting>
 </settings>
 ----EOF
 echo "${config}" > "$ConfFile"
@@ -1061,11 +1665,30 @@ export XMLTV
 [ "$Offset" ] && export Offset
 [ "$ZipCode" ] && export ZipCode
 
+# Debug: Display environment variables
+echo "DEBUG: Environment variables:" >&2
+echo "  CacheDir=$CacheDir" >&2
+echo "  ConfFile=$ConfFile" >&2
+echo "  LogFile=$LogFile" >&2
+echo "  ZipCode=$ZipCode" >&2
+echo "  Days=$Days" >&2
+
+# Optional: Clear cache to force new download
+if [ "$1" = "--clear-cache" ]; then
+    echo "Clearing cache directory..." >&2
+    rm -f "$CacheDir"/*.json.gz
+    rm -f "$CacheDir"/*.json
+    shift
+fi
+
 # Generate XMLTV file
 zap2epg
-if [ $? = 0 ]; then
+result=$?
+if [ $result = 0 ]; then
   [ ! "$Quiet" == "true" ] && cat $XMLTV
 else
+  echo "ERROR: zap2epg script failed with exit code $result" >&2
+  echo "Check log file: $LogFile" >&2
   exit 1
 fi
 
