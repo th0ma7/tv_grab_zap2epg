@@ -15,30 +15,6 @@
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ################################################################################
 
-# Default path for RasbPi Kodi+TVH
-BaseDir="$HOME/script.module.zap2epg/epggrab"
-# If running on common linux under hts user
-[ "$(id hts 2>/dev/null)" ] && BaseDir="$HOME/zap2epg"
-# If running on synology NAS check DSM version for proper path
-if [ "$(uname -a | grep -i synology)" ]; then
-   # Use the local virtualenv python path in order to
-   # get access to all optional locally installed modules
-   export PATH=/var/packages/tvheadend/target/env/bin:${PATH}
-   if [ $(uname -a | sed -e 's/.* #//' -e 's/ .*//') -lt 40000 ]; then
-      # DSM6
-      BaseDir="/var/packages/tvheadend/target/var/epggrab"
-   else
-      # DSM7
-      BaseDir="/var/packages/tvheadend/var/epggrab"
-   fi
-fi
-
-CacheDir="$BaseDir/cache"
-ConfDir="$BaseDir/conf"
-ConfFile="$ConfDir/zap2epg.xml"
-LogDir="$BaseDir/log"
-LogFile="$LogDir/zap2epg.log"
-XMLTV="$CacheDir/xmltv.xml"
 #
 DaysPattern='^[1-9]$|^1[0-4]$'
 CACodePattern='^[A-Z][0-9][A-Z][ ]?[0-9][A-Z][0-9]$'
@@ -48,6 +24,21 @@ Quiet="false"
 ZipCode=""
 Offset=""
 Days=""
+
+# Function to detect system type
+detect_system() {
+    # Check if it's a Raspberry Pi
+    if [ -f /proc/device-tree/model ] && grep -qi "raspberry" /proc/device-tree/model 2>/dev/null; then
+        echo "raspberry"
+    elif [ -f /proc/cpuinfo ] && grep -qi "raspberry" /proc/cpuinfo 2>/dev/null; then
+        echo "raspberry"
+    # Check if it's Synology
+    elif [ "$(uname -a | grep -i synology)" ]; then
+        echo "synology"
+    else
+        echo "linux"
+    fi
+}
 
 # Function to backup and clean configuration file
 clean_config_file() {
@@ -73,6 +64,111 @@ clean_config_file() {
         echo "Cleaned configuration file: removed deprecated entries" >&2
     fi
 }
+
+# Manage user arguments
+while [ $# -gt 0 ]; do
+   case "$1" in
+      -d | --description )
+        printf "North America (tvlistings.gracenote.com using zap2epg)\n"
+        exit 0
+        ;;
+
+      -v | --version )
+        printf "3.0\n"
+        exit 0
+        ;;
+
+      -c | --capabilities )
+        printf "baseline\n"
+        exit 0
+        ;;
+
+      -q | --quiet )
+        Quiet="true"
+        ;;
+
+      -o | --output )
+        shift
+        XMLTV="$1"
+        ;;
+
+      -d | --days )
+        shift
+        Days="$1"
+        ;;
+
+      --offset )
+        shift
+        Offset="$1"
+        ;;
+
+      --config-file )
+        shift
+        ConfFile="$1"
+        ;;
+
+      --basedir )
+        shift
+        BaseDir="$1"
+        ;;
+
+      --zip | --postal | --code )
+        shift
+        # Remove " " from postal code if any
+        ZipCode=$(echo ${1} | sed 's/ //g')
+        ;;
+
+      -* )
+        printf "unknown option: %s\n" "$1"
+        printf "Usage: %s: [--description] [--version] [--capabilities] [--basedir DIR]\n" ${0##*/}
+        exit 2
+        ;;
+   esac
+   shift
+done
+
+# Intelligent BaseDir detection if not specified via --basedir
+if [ ! "${BaseDir}" ]; then
+   SYSTEM_TYPE=$(detect_system)
+
+   case "$SYSTEM_TYPE" in
+       "raspberry")
+           # Raspberry Pi - use Kodi path if available, otherwise default
+           if [ -d "$HOME/script.module.zap2epg/epggrab" ]; then
+               BaseDir="$HOME/script.module.zap2epg/epggrab"
+           else
+               BaseDir="$HOME/zap2epg"
+           fi
+           ;;
+       "synology")
+           # Synology NAS - enhanced logic with zap2epg subdirectory
+           export PATH=/var/packages/tvheadend/target/env/bin:${PATH}
+           if [ $(uname -a | sed -e 's/.* #//' -e 's/ .*//') -lt 40000 ]; then
+               # DSM6
+               BaseDir="/var/packages/tvheadend/target/var/epggrab/zap2epg"
+           else
+               # DSM7
+               BaseDir="/var/packages/tvheadend/var/epggrab/zap2epg"
+           fi
+           ;;
+       *)
+           # Standard Linux - check for hts user, otherwise use $HOME/zap2epg
+           if [ "$(id hts 2>/dev/null)" ]; then
+               BaseDir="$HOME/zap2epg"
+           else
+               BaseDir="$HOME/zap2epg"
+           fi
+           ;;
+   esac
+fi
+
+# Define directory structure based on BaseDir
+CacheDir="$BaseDir/cache"
+ConfDir="$BaseDir/conf"
+ConfFile="$ConfDir/zap2epg.xml"
+LogDir="$BaseDir/log"
+LogFile="$LogDir/zap2epg.log"
+XMLTV="$CacheDir/xmltv.xml"
 
 zap2epg() {
 	read -r -d '' script <<-"----EOF"
@@ -1565,63 +1661,6 @@ read -r -d '' config <<-"----EOF"
 ----EOF
 echo "${config}" > "$ConfFile"
 fi
-
-# Manage user arguments
-while [ $# -gt 0 ]; do
-   case "$1" in
-      -d | --description )
-        printf "North America (tvlistings.gracenote.com using zap2epg)\n"
-        exit 0
-        ;;
-
-      -v | --version )
-        printf "3.0\n"
-        exit 0
-        ;;
-
-      -c | --capabilities )
-        printf "baseline\n"
-        exit 0
-        ;;
-
-      -q | --quiet )
-        Quiet="true"
-        ;;
-
-      -o | --output )
-        shift
-        XMLTV="$1"
-        ;;
-
-      -d | --days )
-        shift
-        Days="$1"
-        ;;
-
-      --offset )
-        shift
-        Offset="$1"
-        ;;
-
-      --config-file )
-        shift
-        ConfFile="$1"
-        ;;
-
-      --zip | --postal | --code )
-        shift
-        # Remove " " from postal code if any
-        ZipCode=$(echo ${1} | sed 's/ //g')
-        ;;
-
-      -* )
-        printf "unknown option: %s\n" "$1"
-        printf "Usage: %s: [--description] [--version] [--capabilities]\n" ${0##*/}
-        exit 2
-        ;;
-   esac
-   shift
-done
 
 # Check output path and ability to write
 if [[ ! -d $(dirname $XMLTV) ]]; then
