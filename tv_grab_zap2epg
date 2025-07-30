@@ -20,6 +20,7 @@ DaysPattern='^[1-9]$|^1[0-4]$'
 CACodePattern='^[A-Z][0-9][A-Z][ ]?[0-9][A-Z][0-9]$'
 USCodePattern='^[0-9]{5}$'
 #
+VERSION="4.0"
 Quiet="false"
 Debug="false"
 ZipCode=""
@@ -41,31 +42,6 @@ detect_system() {
     fi
 }
 
-# Function to backup and clean configuration file
-clean_config_file() {
-    local config_file="$1"
-    local temp_file="${config_file}.tmp"
-    local backup_file="${config_file}.backup.$(date +%Y%m%d_%H%M%S)"
-
-    if [ -f "$config_file" ]; then
-        # Create backup
-        cp "$config_file" "$backup_file"
-        echo "Created backup: $backup_file" >&2
-
-        # Clean deprecated entries
-        sed -E '
-            # Remove desc01-desc20 entries (deprecated complex formatting system)
-            /<setting id="desc[0-9]{2}">/d
-            # Remove useragent entry (deprecated)
-            /<setting id="useragent">/d
-        ' "$config_file" > "$temp_file"
-
-        # Replace original with cleaned version
-        mv "$temp_file" "$config_file"
-        echo "Cleaned configuration file: removed deprecated complex formatting entries" >&2
-    fi
-}
-
 # Manage user arguments
 while [ $# -gt 0 ]; do
    case "$1" in
@@ -75,7 +51,7 @@ while [ $# -gt 0 ]; do
         ;;
 
       -v | --version )
-        printf "3.0\n"
+        printf "%s\n" "$VERSION"
         exit 0
         ;;
 
@@ -209,7 +185,12 @@ def mainRun(userdata):
         return None, None, None
 
     settingsDict = {}
-    logging.info('Running zap2epg-3.2 with simplified description system')
+    validSettings = {}  # Track valid settings for config cleanup
+    deprecatedSettings = []  # Track deprecated settings found
+
+    # Get version from environment variable
+    script_version = os.environ.get('VERSION', '4.0')
+    logging.info('Running zap2epg-%s with intelligent configuration management', script_version)
     kodiVersion = root.attrib.get('version')
     logging.info('Configuration version: %s', kodiVersion)
 
@@ -258,9 +239,11 @@ def mainRun(userdata):
             return value.lower() in ('true', '1', 'yes', 'on')
         return bool(value)
 
+    # Process settings and track valid ones
     for setting in settingsDict:
         if setting == 'slist':
             stationList = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'zipcode':
             if "ZipCode" in os.environ:
                 zipcode = os.environ.get('ZipCode')
@@ -268,74 +251,181 @@ def mainRun(userdata):
             else:
                 zipcode = settingsDict[setting]
                 logging.info('Using zipcode from config: %s', zipcode)
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'lineup':
             lineup = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'lineupcode':
             lineupcode = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'device':
             device = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'days':
             if "Days" in os.environ:
                 days = os.environ.get('Days')
             else:
                 days = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'redays':
             redays = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'xdetails':
             xdetails = parse_boolean(settingsDict[setting])
             logging.debug('Parsed xdetails: %s -> %s', settingsDict[setting], xdetails)
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'xdesc':
             xdesc = parse_boolean(settingsDict[setting])
             logging.debug('Parsed xdesc: %s -> %s', settingsDict[setting], xdesc)
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'epicon':
             epicon = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'epgenre':
             epgenre = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'tvhoff':
             tvhoff = parse_boolean(settingsDict[setting])
             logging.debug('Parsed tvhoff: %s -> %s', settingsDict[setting], tvhoff)
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'tvhurl':
             tvhurl = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'tvhport':
             tvhport = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'usern':
             usern = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'passw':
             passw = settingsDict[setting]
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'chmatch':
             chmatch = parse_boolean(settingsDict[setting])
             logging.debug('Parsed chmatch: %s -> %s', settingsDict[setting], chmatch)
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'tvhmatch':
             tvhmatch = parse_boolean(settingsDict[setting])
             logging.debug('Parsed tvhmatch: %s -> %s', settingsDict[setting], tvhmatch)
+            validSettings[setting] = settingsDict[setting]
         elif setting == 'stitle':
             stitle = parse_boolean(settingsDict[setting])
             logging.debug('Parsed stitle: %s -> %s', settingsDict[setting], stitle)
+            validSettings[setting] = settingsDict[setting]
         elif setting.startswith('desc'):
-            # Ignore deprecated desc01-desc20 complex formatting system
-            logging.info('Ignoring deprecated formatting setting: %s (using intelligent default formatting)', setting)
+            # Handle deprecated desc01-desc20 complex formatting system
+            if re.match(r'desc[0-9]{2}', setting):
+                deprecatedSettings.append(f'{setting} (deprecated custom formatting)')
+                logging.info('Found deprecated custom formatting setting: %s (will be removed)', setting)
+            else:
+                logging.warning('Unknown description setting: %s (will be removed)', setting)
+                deprecatedSettings.append(f'{setting} (unknown desc setting)')
+        elif setting == 'useragent':
+            # Handle deprecated useragent setting
+            deprecatedSettings.append(f'{setting} (deprecated)')
+            logging.info('Found deprecated setting: %s (will be removed)', setting)
         else:
-            logging.debug('Unknown configuration setting: %s = %s', setting, settingsDict[setting])
+            # Unknown setting - could be future setting or typo
+            logging.warning('Unknown configuration setting: %s = %s (will be removed)', setting, settingsDict[setting])
+            deprecatedSettings.append(f'{setting} (unknown)')
+
+    def cleanConfigFile(configFile, validSettings, version, deprecatedList):
+        """Intelligently clean configuration file by removing deprecated settings"""
+        try:
+            # Only proceed if there are deprecated settings to remove
+            if not deprecatedList:
+                logging.debug('No deprecated settings found - configuration file is clean')
+                return
+
+            # Create backup only when modifications are needed
+            import shutil
+            backup_file = f"{configFile}.backup.{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            shutil.copy2(configFile, backup_file)
+            logging.info('Created configuration backup: %s', backup_file)
+
+            # Build new XML structure
+            from xml.dom import minidom
+
+            # Create new document
+            doc = minidom.Document()
+            settings_elem = doc.createElement('settings')
+            settings_elem.setAttribute('version', version or '3')
+            doc.appendChild(settings_elem)
+
+            # Add valid settings in a logical order
+            setting_order = [
+                'zipcode', 'lineupcode', 'lineup', 'device', 'days', 'redays',
+                'slist', 'stitle', 'xdetails', 'xdesc', 'epgenre', 'epicon',
+                'tvhoff', 'usern', 'passw', 'tvhurl', 'tvhport', 'tvhmatch', 'chmatch'
+            ]
+
+            # Add settings in preferred order (using original format with text content)
+            for setting_id in setting_order:
+                if setting_id in validSettings:
+                    setting_elem = doc.createElement('setting')
+                    setting_elem.setAttribute('id', setting_id)
+                    if validSettings[setting_id] is not None:
+                        # Use text content instead of value attribute (original format)
+                        text_node = doc.createTextNode(str(validSettings[setting_id]))
+                        setting_elem.appendChild(text_node)
+                    settings_elem.appendChild(setting_elem)
+
+            # Add any remaining valid settings not in the ordered list
+            for setting_id, value in validSettings.items():
+                if setting_id not in setting_order:
+                    setting_elem = doc.createElement('setting')
+                    setting_elem.setAttribute('id', setting_id)
+                    if value is not None:
+                        # Use text content instead of value attribute (original format)
+                        text_node = doc.createTextNode(str(value))
+                        setting_elem.appendChild(text_node)
+                    settings_elem.appendChild(setting_elem)
+
+            # Write cleaned configuration (with proper XML format but original element structure)
+            with open(configFile, 'w', encoding='utf-8') as f:
+                # Write XML declaration
+                f.write('<?xml version="1.0" encoding="utf-8"?>\n')
+                # Write settings element with proper formatting
+                f.write(f'<settings version="{version or "3"}">\n')
+
+                # Write settings in order with original format (text content, not attributes)
+                for setting_id in setting_order:
+                    if setting_id in validSettings:
+                        value = validSettings[setting_id]
+                        if value is not None and str(value).strip():
+                            f.write(f'  <setting id="{setting_id}">{value}</setting>\n')
+                        else:
+                            f.write(f'  <setting id="{setting_id}"></setting>\n')
+
+                # Write any remaining settings not in ordered list
+                for setting_id, value in validSettings.items():
+                    if setting_id not in setting_order:
+                        if value is not None and str(value).strip():
+                            f.write(f'  <setting id="{setting_id}">{value}</setting>\n')
+                        else:
+                            f.write(f'  <setting id="{setting_id}"></setting>\n')
+
+                f.write('</settings>\n')
+
+            logging.info('Configuration cleaned successfully')
+            logging.info('  Removed %d deprecated/unknown settings: %s',
+                        len(deprecatedList), ', '.join(deprecatedList))
+            logging.info('  Kept %d valid settings', len(validSettings))
+
+        except Exception as e:
+            logging.error('Error cleaning configuration file: %s', str(e))
+            logging.error('Continuing with existing configuration...')
+
+    # Clean configuration file if deprecated settings were found
+    if deprecatedSettings:
+        cleanConfigFile(settingsFile, validSettings, kodiVersion, deprecatedSettings)
 
     # Debug: Display all values read from configuration
-    logging.info('Configuration values read:')
+    logging.info('Configuration values processed:')
     logging.info('  zipcode: %s', zipcode)
     logging.info('  lineup: %s', lineup)
     logging.info('  xdetails (download extended data): %s', xdetails)
     logging.info('  xdesc (use extended descriptions): %s', xdesc)
-
-    # Determine if we need to download extended details
-    need_extended_download = xdetails or xdesc
-
-    # Log configuration logic
-    if xdesc and not xdetails:
-        logging.info('xdesc=true detected - automatically enabling extended details download')
-    elif xdetails and not xdesc:
-        logging.info('xdetails=true - downloading extended data but using basic descriptions')
-    elif xdetails and xdesc:
-        logging.info('Both xdetails and xdesc enabled - full extended functionality')
-    else:
-        logging.info('Extended features disabled - using basic guide data only')
 
     # Validate required variables and set defaults
     if not zipcode:
@@ -356,10 +446,10 @@ def mainRun(userdata):
     if not days:
         days = '1'  # Default value
 
-    # Determine if we need to download extended details
+    # Determine if we need to download extended details (xdetails OR xdesc)
     need_extended_download = xdetails or xdesc
 
-    # Log configuration logic
+    # Log configuration logic clearly
     if xdesc and not xdetails:
         logging.info('xdesc=true detected - automatically enabling extended details download')
     elif xdetails and not xdesc:
@@ -385,7 +475,7 @@ def mainRun(userdata):
     else:
         offset = 0.0
     pythonStartTime = time.time()
-    dayHours = int(days) * 8 # set back to 8 when done testing
+    dayHours = int(days) * 8
     gridtimeStart = (int(time.mktime(time.strptime(str(datetime.datetime.now().replace(microsecond=0,second=0,minute=0)), '%Y-%m-%d %H:%M:%S'))) + offset*86400)
     cacheDir = os.path.join(userdata, os.environ.get('CacheDir'))
     schedule = {}
@@ -816,9 +906,6 @@ def mainRun(userdata):
     def genreSort(EPfilter, EPgenre):
         genreList = []
         if epgenre == '2':
-            # for f in EPfilter:
-            #     fClean = re.sub('filter-','',f)
-            #     genreList.append(fClean)
             for g in EPgenre:
                 if g != "Comedy":
                     genreList.append(g)
@@ -853,9 +940,6 @@ def mainRun(userdata):
             if 'Music' in genreList:
                 genreList.insert(0, "Music / Ballet / Dance")
         if epgenre == '1':
-            # for f in EPfilter:
-            #     fClean = re.sub('filter-','',f)
-            #     genreList.append(fClean)
             for g in EPgenre:
                 genreList.append(g)
             if 'Movie' in genreList or 'movie' in genreList or 'Movies' in genreList:
@@ -881,9 +965,6 @@ def mainRun(userdata):
             else:
                 genreList = ["Variety show"]
         if epgenre == '3':
-            # for f in EPfilter:
-            #     fClean = re.sub('filter-','',f)
-            #     genreList.append(fClean)
             for g in EPgenre:
                 genreList.append(g)
         if 'Movie' in genreList:
@@ -1186,30 +1267,43 @@ def mainRun(userdata):
             ch_guide = json.loads(content)
             for station in ch_guide['channels']:
                 skey = station.get('channelId')
-                if stationList is not None:
-                    if skey in stationList:
-                        schedule[skey] = {}
-                        chSign = station.get('callSign')
-                        chName = station.get('affiliateName')
-                        schedule[skey]['chfcc'] = chSign
-                        schedule[skey]['chnam'] = chName
-                        schedule[skey]['chicon'] = station.get('thumbnail').split('?')[0]
-                        chnumStart = station.get('channelNo')
-                        if '.' not in chnumStart and chmatch and chSign is not None:
-                            chsub = re.search(r'(\d+)$', chSign)
-                            if chsub is not None:
-                                chnumUpdate = chnumStart + '.' + chsub.group(0)
-                            else:
-                                chnumUpdate = chnumStart + '.1'
+
+                # NOUVELLE LOGIQUE: Déterminer si cette station doit être traitée
+                should_process_station = False
+
+                if stationList is not None and len(stationList) > 0:
+                    # Utiliser la liste explicite de stations
+                    should_process_station = skey in stationList
+                    logging.debug('Using explicit station list: %s in list = %s', skey, should_process_station)
+                elif tvhmatch and len(tvhMatchDict) > 0:
+                    # Utiliser les chaînes Tvheadend comme filtre
+                    chNum = station.get('channelNo', '')
+                    chSign = station.get('callSign', '')
+
+                    # Vérifier si le numéro de chaîne correspond à une chaîne Tvheadend
+                    # Tester différents formats possibles
+                    possible_numbers = [chNum]
+                    if '.' not in chNum and chmatch and chSign:
+                        chsub = re.search(r'(\d+)$', chSign)
+                        if chsub is not None:
+                            possible_numbers.append(chNum + '.' + chsub.group(0))
                         else:
-                            chnumUpdate = chnumStart
-                        schedule[skey]['chnum'] = chnumUpdate
-                        if tvhmatch and '.' in chnumUpdate:
-                            if chnumUpdate in tvhMatchDict:
-                                schedule[skey]['chtvh'] = tvhMatchDict[chnumUpdate]
-                            else:
-                                schedule[skey]['chtvh'] = None
+                            possible_numbers.append(chNum + '.1')
+
+                    for possible_num in possible_numbers:
+                        if possible_num in tvhMatchDict:
+                            should_process_station = True
+                            logging.debug('Station %s (channel %s->%s) matches Tvheadend channel %s (%s)',
+                                        skey, chNum, possible_num, possible_num, tvhMatchDict[possible_num])
+                            break
+
+                    if not should_process_station:
+                        logging.debug('Station %s (channel %s, callsign %s) not found in Tvheadend - skipping', skey, chNum, chSign)
                 else:
+                    # Pas de filtrage - prendre toutes les stations
+                    should_process_station = True
+
+                if should_process_station:
                     schedule[skey] = {}
                     chSign = station.get('callSign')
                     chName = station.get('affiliateName')
@@ -1226,11 +1320,10 @@ def mainRun(userdata):
                     else:
                         chnumUpdate = chnumStart
                     schedule[skey]['chnum'] = chnumUpdate
-                    if tvhmatch and '.' in chnumUpdate:
-                        if chnumUpdate in tvhMatchDict:
-                            schedule[skey]['chtvh'] = tvhMatchDict[chnumUpdate]
-                        else:
-                            schedule[skey]['chtvh'] = None
+                    if tvhmatch and chnumUpdate in tvhMatchDict:
+                        schedule[skey]['chtvh'] = tvhMatchDict[chnumUpdate]
+                    else:
+                        schedule[skey]['chtvh'] = None
         except Exception as e:
             logging.exception('Exception: parseStations')
 
@@ -1240,9 +1333,34 @@ def mainRun(userdata):
             ch_guide = json.loads(content)
             for station in ch_guide['channels']:
                 skey = station.get('channelId')
-                if stationList is not None:
-                    if skey in stationList:
-                        episodes = station.get('events')
+
+                # MÊME LOGIQUE que dans parseStations
+                should_process_station = False
+
+                if stationList is not None and len(stationList) > 0:
+                    should_process_station = skey in stationList
+                elif tvhmatch and len(tvhMatchDict) > 0:
+                    chNum = station.get('channelNo', '')
+                    chSign = station.get('callSign', '')
+
+                    possible_numbers = [chNum]
+                    if '.' not in chNum and chmatch and chSign:
+                        chsub = re.search(r'(\d+)$', chSign)
+                        if chsub is not None:
+                            possible_numbers.append(chNum + '.' + chsub.group(0))
+                        else:
+                            possible_numbers.append(chNum + '.1')
+
+                    for possible_num in possible_numbers:
+                        if possible_num in tvhMatchDict:
+                            should_process_station = True
+                            break
+                else:
+                    should_process_station = True
+
+                if should_process_station:
+                    episodes = station.get('events')
+                    if episodes:  # Vérifier que episodes n'est pas None
                         for episode in episodes:
                             epkey = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
                             schedule[skey][epkey] = {}
@@ -1292,51 +1410,6 @@ def mainRun(userdata):
                             elif schedule[skey][epkey]['eptitle']:
                                 if "TBA" in schedule[skey][epkey]['eptitle']:
                                     CheckTBA = "Unsafe"
-                else:
-                    episodes = station.get('events')
-                    for episode in episodes:
-                        epkey = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
-                        schedule[skey][epkey] = {}
-
-                        # Improved description retrieval
-                        program = episode.get('program', {})
-                        shortDesc = program.get('shortDesc') or ''
-                        longDesc = program.get('longDesc') or ''
-
-                        # Handle None values properly
-                        if shortDesc is None:
-                            shortDesc = ''
-                        if longDesc is None:
-                            longDesc = ''
-
-                        schedule[skey][epkey]['epid'] = episode['program'].get('tmsId')
-                        schedule[skey][epkey]['epstart'] = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
-                        schedule[skey][epkey]['epend'] = str(calendar.timegm(time.strptime(episode.get('endTime'), '%Y-%m-%dT%H:%M:%SZ')))
-                        schedule[skey][epkey]['eplength'] = episode.get('duration')
-                        schedule[skey][epkey]['epshow'] = episode['program'].get('title')
-                        schedule[skey][epkey]['eptitle'] = episode['program'].get('episodeTitle')
-                        schedule[skey][epkey]['epdesc'] = longDesc if longDesc else shortDesc  # Priority to longDesc
-                        schedule[skey][epkey]['epyear'] = episode['program'].get('releaseYear')
-                        schedule[skey][epkey]['eprating'] = episode.get('rating')
-                        schedule[skey][epkey]['epflag'] = episode.get('flag')
-                        schedule[skey][epkey]['eptags'] = episode.get('tags')
-                        schedule[skey][epkey]['epsn'] = episode['program'].get('season')
-                        schedule[skey][epkey]['epen'] = episode['program'].get('episode')
-                        schedule[skey][epkey]['epthumb'] = episode.get('thumbnail')
-                        schedule[skey][epkey]['epoad'] = None
-                        schedule[skey][epkey]['epstar'] = None
-                        schedule[skey][epkey]['epfilter'] = episode.get('filter')
-                        schedule[skey][epkey]['epgenres'] = None
-                        schedule[skey][epkey]['epcredits'] = None
-                        schedule[skey][epkey]['epseries'] = episode['program'].get('seriesId')  # seriesId is in program
-                        schedule[skey][epkey]['epimage'] = None
-                        schedule[skey][epkey]['epfan'] = None
-                        schedule[skey][epkey]['epseriesdesc'] = None  # Will be populated by parseXdetails
-                        if "TBA" in schedule[skey][epkey]['epshow']:
-                            CheckTBA = "Unsafe"
-                        elif schedule[skey][epkey]['eptitle']:
-                            if "TBA" in schedule[skey][epkey]['eptitle']:
-                                CheckTBA = "Unsafe"
         except Exception as e:
             logging.exception('Exception: parseEpisodes')
         return CheckTBA
@@ -1517,9 +1590,19 @@ def mainRun(userdata):
         count = 0
         gridtime = gridtimeStart
         if stationList is None:
-            logging.info('No channel list found - adding all stations!')
+            logging.info('No explicit channel list found in configuration')
         if tvhoff and tvhmatch:
             tvhMatchGet()
+
+        # CORRECTION: Ajouter des logs pour debug après tvhMatchGet
+        if tvhmatch and len(tvhMatchDict) > 0:
+            logging.info('Tvheadend channel filtering enabled: %d channels will be used as filter', len(tvhMatchDict))
+            logging.debug('Tvheadend channels: %s', list(tvhMatchDict.keys())[:10])  # Show first 10 for debug
+        elif stationList and len(stationList) > 0:
+            logging.info('Explicit station list filtering: %d stations configured', len(stationList))
+        else:
+            logging.info('No channel filtering - all available stations will be processed')
+
         deleteOldCache(gridtimeStart)
 
         # OPTIMIZED MAIN GUIDE DOWNLOAD
@@ -1590,6 +1673,8 @@ def mainRun(userdata):
 
         showList = genShowList()
         deleteOldShowCache(showList)
+
+        # Download extended details if needed (either xdetails=true OR xdesc=true)
         if need_extended_download:
             logging.info('Extended details download enabled (xdetails=%s, xdesc=%s)', xdetails, xdesc)
             parseXdetails()
@@ -1648,11 +1733,6 @@ python3 -c "$script"
 [ ! -d $CacheDir ] && mkdir -m 755 -p $CacheDir
 [ ! -d $LogDir ] && mkdir -m 755 -p $LogDir
 [ ! -d $ConfDir ] && mkdir -m 755 -p $ConfDir
-
-# Clean configuration file if it exists
-if [ -f "$ConfFile" ]; then
-    clean_config_file "$ConfFile"
-fi
 
 # if configuration file doesn't exist
 # create one by default (cleaned version without desc01-desc20)
@@ -1722,6 +1802,7 @@ export ConfFile
 export LogFile
 export XMLTV
 export Debug
+export VERSION
 [ "$Days" ] && export Days
 [ "$Offset" ] && export Offset
 [ "$ZipCode" ] && export ZipCode
