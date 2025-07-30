@@ -51,9 +51,9 @@ clean_config_file() {
         cp "$config_file" "$backup_file"
         echo "Created backup: $backup_file" >&2
 
-        # Clean invalid entries and deprecated settings
+        # Clean deprecated entries
         sed -E '
-            # Remove desc01-desc20 entries
+            # Remove desc01-desc20 entries (deprecated complex formatting system)
             /<setting id="desc[0-9]{2}">/d
             # Remove useragent entry (deprecated)
             /<setting id="useragent">/d
@@ -61,7 +61,7 @@ clean_config_file() {
 
         # Replace original with cleaned version
         mv "$temp_file" "$config_file"
-        echo "Cleaned configuration file: removed deprecated entries" >&2
+        echo "Cleaned configuration file: removed deprecated complex formatting entries" >&2
     fi
 }
 
@@ -204,10 +204,9 @@ def mainRun(userdata):
         return None, None, None
 
     settingsDict = {}
-    xdescOrderDict = {}
-    logging.info('Running zap2epg-3.2')
+    logging.info('Running zap2epg-3.2 with simplified description system')
     kodiVersion = root.attrib.get('version')
-    logging.info('Kodi settings version: %s', kodiVersion)
+    logging.info('Configuration version: %s', kodiVersion)
 
     for setting in root.findall('setting'):
         settingID = setting.get('id')
@@ -308,8 +307,8 @@ def mainRun(userdata):
             stitle = parse_boolean(settingsDict[setting])
             logging.debug('Parsed stitle: %s -> %s', settingsDict[setting], stitle)
         elif setting.startswith('desc'):
-            # Skip deprecated desc01-desc20 entries (they should be cleaned from config)
-            logging.warning('Found deprecated description setting: %s (will be ignored)', setting)
+            # Ignore deprecated desc01-desc20 complex formatting system
+            logging.info('Ignoring deprecated formatting setting: %s (using intelligent default formatting)', setting)
         else:
             logging.debug('Unknown configuration setting: %s = %s', setting, settingsDict[setting])
 
@@ -317,8 +316,8 @@ def mainRun(userdata):
     logging.info('Configuration values read:')
     logging.info('  zipcode: %s', zipcode)
     logging.info('  lineup: %s', lineup)
-    logging.info('  xdetails: %s', xdetails)
-    logging.info('  xdesc: %s', xdesc)
+    logging.info('  xdetails (download extended data): %s', xdetails)
+    logging.info('  xdesc (use extended descriptions): %s', xdesc)
 
     # Validate required variables and set defaults
     if not zipcode:
@@ -339,7 +338,19 @@ def mainRun(userdata):
     if not days:
         days = '1'  # Default value
 
-    xdescOrder = [value for (key, value) in sorted(xdescOrderDict.items())]
+    # Determine if we need to download extended details
+    need_extended_download = xdetails or xdesc
+
+    # Log configuration logic
+    if xdesc and not xdetails:
+        logging.info('xdesc=true detected - automatically enabling extended details download')
+    elif xdetails and not xdesc:
+        logging.info('xdetails=true - downloading extended data but using basic descriptions')
+    elif xdetails and xdesc:
+        logging.info('Both xdetails and xdesc enabled - full extended functionality')
+    else:
+        logging.info('Extended features disabled - using basic guide data only')
+
     if lineupcode != 'lineupId':
         chmatch = False
         tvhmatch = False
@@ -363,8 +374,10 @@ def mainRun(userdata):
     tvhMatchDict = {}
 
     # Debug: Log description parameters
-    logging.info('\tXdetails setting: %s', xdetails)
-    logging.info('\tXdesc setting: %s', xdesc)
+    logging.info('\tExtended details download: %s (triggered by xdetails=%s or xdesc=%s)',
+                 need_extended_download, xdetails, xdesc)
+    logging.info('\tExtended descriptions: %s', xdesc)
+    logging.info('\tIntelligent description formatting: enabled (no complex configuration required)')
 
     logging.info('\tTV Guide duration: %s days', days)
     if int(offset) > 1:
@@ -905,17 +918,112 @@ def mainRun(userdata):
         except Exception as e:
             logging.exception('Exception: printStations')
 
+    def addXDetails(edict):
+        """Create enhanced description using intelligent default formatting"""
+        try:
+            # PRIORITY 1: Use extended series description from downloaded JSON if available
+            extended_desc = edict.get('epseriesdesc')
+            if extended_desc:
+                extended_desc = extended_desc.strip()
+            else:
+                extended_desc = ''
+
+            # PRIORITY 2: Use basic episode description from TV guide
+            guide_desc = edict.get('epdesc')
+            if guide_desc:
+                guide_desc = guide_desc.strip()
+            else:
+                guide_desc = ''
+
+            # Choose primary description
+            if extended_desc and len(extended_desc) > len(guide_desc):
+                base_desc = extended_desc
+                logging.debug('Using extended series description for %s', edict.get('epshow', 'Unknown'))
+            elif guide_desc:
+                base_desc = guide_desc
+            else:
+                return None
+
+            # Start with base description
+            enhanced_parts = [base_desc]
+
+            # Add additional info intelligently
+            additional_info = []
+
+            # Add year for movies/shows
+            if edict.get('epyear') and str(edict['epyear']) != '0':
+                additional_info.append(f"({edict['epyear']})")
+
+            # Add season/episode info for series
+            if edict.get('epsn') and edict.get('epen'):
+                season_ep = f"S{int(edict['epsn']):02d}E{int(edict['epen']):02d}"
+                additional_info.append(season_ep)
+
+            # Add premiere date if available
+            if edict.get('epoad') and int(edict['epoad']) > 0:
+                try:
+                    is_dst = time.daylight and time.localtime().tm_isdst > 0
+                    TZoffset = (time.altzone if is_dst else time.timezone)
+                    origDate = int(edict['epoad']) + TZoffset
+                    premiere_date = datetime.datetime.fromtimestamp(origDate).strftime('%Y-%m-%d')
+                    additional_info.append(f"Premiered: {premiere_date}")
+                except:
+                    pass
+
+            # Add rating if available
+            if edict.get('eprating'):
+                additional_info.append(f"Rated: {edict['eprating']}")
+
+            # Add flags
+            flags = []
+            if edict.get('epflag'):
+                if 'New' in edict['epflag']:
+                    flags.append('NEW')
+                if 'Live' in edict['epflag']:
+                    flags.append('LIVE')
+                if 'Premiere' in edict['epflag']:
+                    flags.append('PREMIERE')
+                if 'Finale' in edict['epflag']:
+                    flags.append('FINALE')
+
+            if edict.get('eptags'):
+                if 'CC' in edict['eptags']:
+                    flags.append('CC')
+                if 'HD' in edict['eptags']:
+                    flags.append('HD')
+
+            if flags:
+                additional_info.append(' '.join(flags))
+
+            # Combine everything intelligently
+            if additional_info:
+                info_str = ' | '.join(additional_info)
+                enhanced_description = f"{base_desc} • {info_str}"
+
+                # Only return enhanced if it's meaningfully different
+                if enhanced_description != base_desc:
+                    return enhanced_description
+
+            return base_desc if base_desc else None
+
+        except Exception as e:
+            logging.warning('Error creating enhanced description: %s', str(e))
+            # Fallback to basic description with safe handling
+            basic_desc = edict.get('epdesc')
+            return basic_desc.strip() if basic_desc else None
+
     def printEpisodes(fh):
         global episodeCount
         episodeCount = 0
-        desc_count = 0
-        xdesc_count = 0
+        basic_desc_count = 0
+        enhanced_desc_count = 0
+
         try:
             logging.info('Writing Episodes to xmltv.xml file...')
             if xdesc is True:
-                logging.info('Extended descriptions enabled (xdesc=true)')
+                logging.info('Enhanced descriptions enabled (using extended data when available)')
             else:
-                logging.info('Using basic descriptions only (xdesc=false)')
+                logging.info('Using basic descriptions only (from TV guide)')
 
             for station in schedule:
                 lang = 'en'
@@ -942,28 +1050,32 @@ def mainRun(userdata):
                                     else:
                                         fh.write('\t\t<sub-title lang=\"' + lang + '\">' + showTitle + '</sub-title>\n')
 
-                                # MAJOR FIX: Logic for descriptions with proper fallback
+                                # SIMPLIFIED: Description logic with extended data preference
                                 description_written = False
 
-                                # Try extended descriptions first if enabled
-                                if xdesc is True:
+                                # Try enhanced descriptions first if enabled and we have downloaded extended data
+                                if xdesc is True and need_extended_download:
                                     try:
-                                        xdescSort = addXDetails(edict)
-                                        if xdescSort is not None and xdescSort.strip():
-                                            fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(xdescSort) + '</desc>\n')
-                                            xdesc_count += 1
-                                            description_written = True
+                                        enhanced_desc = addXDetails(edict)
+                                        if enhanced_desc and enhanced_desc.strip():
+                                            # Check if this is truly enhanced (not just the basic description)
+                                            basic_desc = edict.get('epdesc', '').strip()
+                                            if (enhanced_desc.strip() != basic_desc or
+                                                edict.get('epseriesdesc', '').strip()):  # Has extended data
+                                                fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(enhanced_desc) + '</desc>\n')
+                                                enhanced_desc_count += 1
+                                                description_written = True
                                     except Exception as e:
-                                        logging.warning('Error generating extended description for episode %s: %s', episode, str(e))
+                                        logging.warning('Error generating enhanced description for episode %s: %s', episode, str(e))
 
-                                # Fallback to basic description if no extended description was written
+                                # Fallback to basic description
                                 if not description_written:
-                                    if edict.get('epdesc') is not None and str(edict['epdesc']).strip():
+                                    if edict.get('epdesc') and str(edict['epdesc']).strip():
                                         fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(edict['epdesc']) + '</desc>\n')
-                                        desc_count += 1
+                                        basic_desc_count += 1
                                         description_written = True
 
-                                # Debug: count episodes without description
+                                # Log missing descriptions
                                 if not description_written:
                                     logging.warning('No description available for: %s - %s',
                                                   edict.get('epshow', 'Unknown'),
@@ -1015,7 +1127,7 @@ def mainRun(userdata):
                                     for c in edict['epcredits']:
                                         if c['assetId'] is not None and c['assetId'] != '':
                                             crole=c['role']
-                                            fh.write('\t\t\t<' + c['role'].lower() + ' role="' + convHTML(c['characterName']) + '" src="https://zap2it.tmsimg.com/assets/' + c['assetId'] + '.jpg">' + convHTML(c['name']) + '</' + c['role'].lower() + '>\n')
+                                            fh.write('\t\t\t<' + c['role'].lower() + ' role="' + convHTML(c['characterName']) + '" src="https://zap2it.tmsImg.com/assets/' + c['assetId'] + '.jpg">' + convHTML(c['name']) + '</' + c['role'].lower() + '>\n')
                                         else:
                                             fh.write('\t\t\t<' + c['role'].lower() + ' role="' + convHTML(c['characterName']) + '">' + convHTML(c['name']) + '</' + c['role'].lower() + '>\n')
                                     fh.write("\t\t</credits>\n")
@@ -1032,9 +1144,9 @@ def mainRun(userdata):
                         except Exception as e:
                             logging.exception('Error processing episode %s:', episode)
 
-            # Log description statistics
-            logging.info('Description statistics: Episodes=%d, Basic_desc=%d, Extended_desc=%d',
-                        episodeCount, desc_count, xdesc_count)
+            # Log statistics
+            logging.info('Description statistics: Episodes=%d, Basic_desc=%d, Enhanced_desc=%d',
+                        episodeCount, basic_desc_count, enhanced_desc_count)
         except Exception as e:
             logging.exception('Exception: printEpisodes')
 
@@ -1117,7 +1229,7 @@ def mainRun(userdata):
                             epkey = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
                             schedule[skey][epkey] = {}
 
-                            # CRITICAL FIX: improved description retrieval
+                            # Improved description retrieval
                             program = episode.get('program', {})
                             shortDesc = program.get('shortDesc') or ''
                             longDesc = program.get('longDesc') or ''
@@ -1140,7 +1252,7 @@ def mainRun(userdata):
                             schedule[skey][epkey]['eplength'] = episode.get('duration')
                             schedule[skey][epkey]['epshow'] = episode['program'].get('title')
                             schedule[skey][epkey]['eptitle'] = episode['program'].get('episodeTitle')
-                            schedule[skey][epkey]['epdesc'] = longDesc if longDesc else shortDesc  # Fix: priority to longDesc
+                            schedule[skey][epkey]['epdesc'] = longDesc if longDesc else shortDesc  # Priority to longDesc
                             schedule[skey][epkey]['epyear'] = episode['program'].get('releaseYear')
                             schedule[skey][epkey]['eprating'] = episode.get('rating')
                             schedule[skey][epkey]['epflag'] = episode.get('flag')
@@ -1153,10 +1265,10 @@ def mainRun(userdata):
                             schedule[skey][epkey]['epfilter'] = episode.get('filter')
                             schedule[skey][epkey]['epgenres'] = None
                             schedule[skey][epkey]['epcredits'] = None
-                            schedule[skey][epkey]['epxdesc'] = None
-                            schedule[skey][epkey]['epseries'] = episode['program'].get('seriesId')  # CRITICAL FIX: seriesId is in program
+                            schedule[skey][epkey]['epseries'] = episode['program'].get('seriesId')  # seriesId is in program
                             schedule[skey][epkey]['epimage'] = None
                             schedule[skey][epkey]['epfan'] = None
+                            schedule[skey][epkey]['epseriesdesc'] = None  # Will be populated by parseXdetails
                             if "TBA" in schedule[skey][epkey]['epshow']:
                                 CheckTBA = "Unsafe"
                             elif schedule[skey][epkey]['eptitle']:
@@ -1168,7 +1280,7 @@ def mainRun(userdata):
                         epkey = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
                         schedule[skey][epkey] = {}
 
-                        # CRITICAL FIX: improved description retrieval
+                        # Improved description retrieval
                         program = episode.get('program', {})
                         shortDesc = program.get('shortDesc') or ''
                         longDesc = program.get('longDesc') or ''
@@ -1185,7 +1297,7 @@ def mainRun(userdata):
                         schedule[skey][epkey]['eplength'] = episode.get('duration')
                         schedule[skey][epkey]['epshow'] = episode['program'].get('title')
                         schedule[skey][epkey]['eptitle'] = episode['program'].get('episodeTitle')
-                        schedule[skey][epkey]['epdesc'] = longDesc if longDesc else shortDesc  # Fix: priority to longDesc
+                        schedule[skey][epkey]['epdesc'] = longDesc if longDesc else shortDesc  # Priority to longDesc
                         schedule[skey][epkey]['epyear'] = episode['program'].get('releaseYear')
                         schedule[skey][epkey]['eprating'] = episode.get('rating')
                         schedule[skey][epkey]['epflag'] = episode.get('flag')
@@ -1198,10 +1310,10 @@ def mainRun(userdata):
                         schedule[skey][epkey]['epfilter'] = episode.get('filter')
                         schedule[skey][epkey]['epgenres'] = None
                         schedule[skey][epkey]['epcredits'] = None
-                        schedule[skey][epkey]['epxdesc'] = None
-                        schedule[skey][epkey]['epseries'] = episode['program'].get('seriesId')  # CRITICAL FIX: seriesId is in program
+                        schedule[skey][epkey]['epseries'] = episode['program'].get('seriesId')  # seriesId is in program
                         schedule[skey][epkey]['epimage'] = None
                         schedule[skey][epkey]['epfan'] = None
+                        schedule[skey][epkey]['epseriesdesc'] = None  # Will be populated by parseXdetails
                         if "TBA" in schedule[skey][epkey]['epshow']:
                             CheckTBA = "Unsafe"
                         elif schedule[skey][epkey]['eptitle']:
@@ -1223,6 +1335,7 @@ def mainRun(userdata):
         return showList
 
     def parseXdetails():
+        """Download and parse extended program details"""
         showList = []
         failList = []
         download_count = 0
@@ -1253,12 +1366,11 @@ def mainRun(userdata):
                                 url = 'https://tvlistings.gracenote.com/api/program/overviewDetails'
                                 data = 'programSeriesID=' + EPseries
 
-                                # Display complete URL with parameters for debug (as before)
+                                # Display complete URL with parameters for debug
                                 full_url_display = f'{url}?{data}'
-                                logging.info('Downloading details data for: %s', EPseries)
+                                logging.info('Downloading extended details for: %s', EPseries)
                                 logging.debug('  URL: %s', full_url_display)
 
-                                # FIX: Use exactly the same method as the working original version
                                 # Encode data like in the original version
                                 data_encode = data.encode('utf-8')
 
@@ -1294,7 +1406,14 @@ def mainRun(userdata):
 
                                         logging.debug('Parsing %s (%d bytes)', filename, fileSize)
 
-                                        # Process details (existing code)
+                                        # ENHANCED: Extract extended series description
+                                        series_desc = EPdetails.get('seriesDescription')
+                                        if series_desc and series_desc.strip():
+                                            edict['epseriesdesc'] = series_desc.strip()
+                                            logging.debug('Found extended series description for %s: %s',
+                                                        EPseries, series_desc[:50] + '...' if len(series_desc) > 50 else series_desc)
+
+                                        # Process other details (existing code)
                                         edict['epimage'] = EPdetails.get('seriesImage')
                                         edict['epfan'] = EPdetails.get('backgroundImage')
                                         EPgenres = EPdetails.get('seriesGenres')
@@ -1373,132 +1492,6 @@ def mainRun(userdata):
 
         except Exception as e:
             logging.error('Critical error in parseXdetails: %s', str(e))
-
-    def addXDetails(edict):
-        try:
-            ratings = ""
-            date = ""
-            myear = ""
-            new = ""
-            live = ""
-            hd = ""
-            cc = ""
-            cast = ""
-            season = ""
-            epis = ""
-            episqts = ""
-            prog = ""
-            plot= ""
-            descsort = ""
-            bullet = "\u2022 "
-            hyphen = "\u2013 "
-            newLine = "\n"
-            space = " "
-            colon = "\u003A "
-            vbar = "\u007C "
-            slash = "\u2215 "
-            comma = "\u002C "
-
-            def getSortName(opt):
-                return {
-                    1: bullet,
-                    2: newLine,
-                    3: hyphen,
-                    4: space,
-                    5: colon,
-                    6: vbar,
-                    7: slash,
-                    8: comma,
-                    9: plot,
-                    10: new,
-                    11: hd,
-                    12: cc,
-                    13: season,
-                    14: ratings,
-                    15: date,
-                    16: prog,
-                    17: epis,
-                    18: episqts,
-                    19: cast,
-                    20: myear,
-                }.get(opt, None)
-
-            def cleanSortList(optList):
-                cleanList=[]
-                optLen = len(optList)
-                for opt in optList:
-                    if opt is not None and str(opt).isdigit():
-                        thisOption = getSortName(int(opt))
-                        if thisOption is not None:
-                            cleanList.append(int(opt))
-                for item in reversed(cleanList):
-                    if cleanList and cleanList[-1] <= 8:
-                        del cleanList[-1]
-                return cleanList
-
-            def makeDescsortList(optList):
-                sortOrderList =[]
-                lastOption = 1
-                cleanedList = cleanSortList(optList)
-                for opt in cleanedList:
-                    thisOption = getSortName(int(opt))
-                    if int(opt) <= 8 and lastOption <= 8:
-                        if int(opt) == 2 and len(sortOrderList) > 1:
-                            del sortOrderList[-1]
-                            sortOrderList.append(thisOption)
-                        lastOption = int(opt)
-                    elif thisOption and lastOption:
-                        sortOrderList.append(thisOption)
-                        lastOption = int(opt)
-                    elif thisOption:
-                        lastOption = int(opt)
-                return sortOrderList
-
-            if edict.get('epoad') is not None and int(edict['epoad']) > 0:
-                is_dst = time.daylight and time.localtime().tm_isdst > 0
-                TZoffset = (time.altzone if is_dst else time.timezone)
-                origDate = int(edict['epoad']) + TZoffset
-                finalDate = datetime.datetime.fromtimestamp(origDate).strftime('%Y-%m-%d')
-                finalDate = re.sub('%', ',', finalDate)
-                date = "Premiere: " + finalDate + space
-            if edict.get('epyear') is not None:
-                myear = str(edict['epyear']) + space
-            if edict.get('eprating') is not None:
-                ratings = str(edict['eprating']) + space
-            if edict.get('eptags') and edict['eptags'] != []:
-                tagsList = edict['eptags']
-                cc = ' | '.join(tagsList).upper() + space
-            #if edict['ephd'] is not None:
-                #hd = edict['ephd'] + space
-            if edict.get('epsn') is not None and edict.get('epen') is not None:
-                s = re.sub('S', '', str(edict['epsn']))
-                sf = "S" + str(int(s))
-                e = re.sub('E', '', str(edict['epen']))
-                ef = "E" + str(int(e))
-                season = sf + " - " + ef + space
-            if edict.get('epshow') is not None:
-                prog = str(edict['epshow']) + space
-            if edict.get('eptitle') is not None:
-                epis = str(edict['eptitle']) + space
-                episqts = '\"' + str(edict['eptitle']) + '\"' + space
-            if edict.get('epdesc') is not None:
-                plot = str(edict['epdesc']) + space
-
-            # todo - handle star ratings
-
-            # Only create extended description if we have xdescOrder configuration
-            if xdescOrder and len(xdescOrder) > 0:
-                descsort = "".join(makeDescsortList(xdescOrder))
-                # Return extended description only if it's different from basic description
-                if descsort.strip() and descsort.strip() != plot.strip():
-                    return descsort
-
-            # Return None to indicate no extended description available (fallback to basic)
-            return None
-        except Exception as e:
-            logging.exception('Exception: addXdetails to description')
-            # In case of error, return None to trigger fallback to basic description
-            return None
 
     try:
         if not os.path.exists(cacheDir):
@@ -1579,8 +1572,8 @@ def mainRun(userdata):
 
         showList = genShowList()
         deleteOldShowCache(showList)
-        if xdetails is True:
-            logging.info('Extended details enabled - downloading additional program information')
+        if need_extended_download:
+            logging.info('Extended details download enabled (xdetails=%s, xdesc=%s)', xdetails, xdesc)
             parseXdetails()
         else:
             logging.info('Extended details disabled - using basic program information only')
@@ -1634,7 +1627,7 @@ if [ -f "$ConfFile" ]; then
 fi
 
 # if configuration file doesn't exist
-# create one by default (cleaned version)
+# create one by default (cleaned version without desc01-desc20)
 if [ ! -f "$ConfFile" ]; then
 read -r -d '' config <<-"----EOF"
 <settings version="3">
