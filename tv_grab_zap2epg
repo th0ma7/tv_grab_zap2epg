@@ -21,6 +21,7 @@ CACodePattern='^[A-Z][0-9][A-Z][ ]?[0-9][A-Z][0-9]$'
 USCodePattern='^[0-9]{5}$'
 #
 Quiet="false"
+Debug="false"
 ZipCode=""
 Offset=""
 Days=""
@@ -87,6 +88,10 @@ while [ $# -gt 0 ]; do
         Quiet="true"
         ;;
 
+      --debug )
+        Debug="true"
+        ;;
+
       -o | --output )
         shift
         XMLTV="$1"
@@ -120,7 +125,7 @@ while [ $# -gt 0 ]; do
 
       -* )
         printf "unknown option: %s\n" "$1"
-        printf "Usage: %s: [--description] [--version] [--capabilities] [--basedir DIR]\n" ${0##*/}
+        printf "Usage: %s: [--description] [--version] [--capabilities] [--quiet] [--debug] [--basedir DIR]\n" ${0##*/}
         exit 2
         ;;
    esac
@@ -318,6 +323,19 @@ def mainRun(userdata):
     logging.info('  lineup: %s', lineup)
     logging.info('  xdetails (download extended data): %s', xdetails)
     logging.info('  xdesc (use extended descriptions): %s', xdesc)
+
+    # Determine if we need to download extended details
+    need_extended_download = xdetails or xdesc
+
+    # Log configuration logic
+    if xdesc and not xdetails:
+        logging.info('xdesc=true detected - automatically enabling extended details download')
+    elif xdetails and not xdesc:
+        logging.info('xdetails=true - downloading extended data but using basic descriptions')
+    elif xdetails and xdesc:
+        logging.info('Both xdetails and xdesc enabled - full extended functionality')
+    else:
+        logging.info('Extended features disabled - using basic guide data only')
 
     # Validate required variables and set defaults
     if not zipcode:
@@ -1127,7 +1145,7 @@ def mainRun(userdata):
                                     for c in edict['epcredits']:
                                         if c['assetId'] is not None and c['assetId'] != '':
                                             crole=c['role']
-                                            fh.write('\t\t\t<' + c['role'].lower() + ' role="' + convHTML(c['characterName']) + '" src="https://zap2it.tmsImg.com/assets/' + c['assetId'] + '.jpg">' + convHTML(c['name']) + '</' + c['role'].lower() + '>\n')
+                                            fh.write('\t\t\t<' + c['role'].lower() + ' role="' + convHTML(c['characterName']) + '" src="https://zap2it.tmsimg.com/assets/' + c['assetId'] + '.jpg">' + convHTML(c['name']) + '</' + c['role'].lower() + '>\n')
                                         else:
                                             fh.write('\t\t\t<' + c['role'].lower() + ' role="' + convHTML(c['characterName']) + '">' + convHTML(c['name']) + '</' + c['role'].lower() + '>\n')
                                     fh.write("\t\t</credits>\n")
@@ -1599,7 +1617,17 @@ def mainRun(userdata):
 if __name__ == '__main__':
     userdata = os.getcwd()
     log = os.path.join(userdata, os.environ.get('LogFile'))
-    logging.basicConfig(filename=log, filemode='w', format='%(asctime)s %(message)s', datefmt='%Y/%m/%d %H:%M:%S', level=logging.DEBUG)
+
+    # Set logging level based on DEBUG environment variable
+    debug_enabled = os.environ.get('Debug', 'false').lower() == 'true'
+    log_level = logging.DEBUG if debug_enabled else logging.INFO
+
+    logging.basicConfig(filename=log, filemode='w', format='%(asctime)s %(message)s',
+                       datefmt='%Y/%m/%d %H:%M:%S', level=log_level)
+
+    if debug_enabled:
+        logging.info('Debug logging enabled - verbose output will be shown')
+
     result = mainRun(userdata)
     if result is None or result == (None, None, None):
         logging.error('Script failed - exiting with error code')
@@ -1693,6 +1721,7 @@ export CacheDir
 export ConfFile
 export LogFile
 export XMLTV
+export Debug
 [ "$Days" ] && export Days
 [ "$Offset" ] && export Offset
 [ "$ZipCode" ] && export ZipCode
