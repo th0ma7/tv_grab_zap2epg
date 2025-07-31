@@ -840,6 +840,96 @@ def mainRun(userdata):
             logging.info('Continuing without Tvheadend channel matching...')
             pass
 
+    def rotateLogFile():
+        """Rotate log file without interrupting tail -f"""
+        try:
+            if os.path.exists(log_file):
+                file_size = os.path.getsize(log_file)
+                # Rotate if log file is larger than 5MB
+                if file_size > 5 * 1024 * 1024:
+                    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                    rotated_log = f"{log_file}.{timestamp}"
+
+                    # Move current log to timestamped version
+                    os.rename(log_file, rotated_log)
+                    logging.info('Log rotated to: %s', os.path.basename(rotated_log))
+
+                    # Clean old log files based on guide days parameter
+                    cleanOldLogs()
+        except Exception as e:
+            logging.warning('Error rotating log file: %s', str(e))
+
+    def cleanOldLogs():
+        """Clean old log files older than guide days parameter"""
+        try:
+            log_dir = os.path.dirname(log_file)
+            if not os.path.exists(log_dir):
+                return
+
+            # Calculate cutoff time based on days parameter
+            cutoff_days = int(days) if days else 1
+            cutoff_time = time.time() - (cutoff_days * 24 * 3600)
+
+            entries = os.listdir(log_dir)
+            for entry in entries:
+                if entry.startswith('zap2epg.log.') and entry.count('_') == 1:
+                    file_path = os.path.join(log_dir, entry)
+                    try:
+                        file_mtime = os.path.getmtime(file_path)
+                        if file_mtime < cutoff_time:
+                            os.remove(file_path)
+                            logging.info('Deleted old log: %s', entry)
+                    except OSError as e:
+                        logging.warning('Error deleting old log %s: %s', entry, str(e))
+        except Exception as e:
+            logging.warning('Error cleaning old logs: %s', str(e))
+
+    def archiveXMLTV():
+        """Archive current XMLTV file before creating new one"""
+        try:
+            xmltv_file = os.path.join(userdata, os.environ.get('XMLTV'))
+            if os.path.exists(xmltv_file):
+                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                archived_xml = f"{xmltv_file}.{timestamp}"
+
+                # Copy current XMLTV to archived version
+                import shutil
+                shutil.copy2(xmltv_file, archived_xml)
+                logging.info('XMLTV archived to: %s', os.path.basename(archived_xml))
+
+                # Clean old XMLTV archives
+                cleanOldXMLTV()
+        except Exception as e:
+            logging.warning('Error archiving XMLTV file: %s', str(e))
+
+    def cleanOldXMLTV():
+        """Clean old XMLTV archives older than guide days parameter"""
+        try:
+            xmltv_file = os.path.join(userdata, os.environ.get('XMLTV'))
+            xmltv_dir = os.path.dirname(xmltv_file)
+            xmltv_basename = os.path.basename(xmltv_file)
+
+            if not os.path.exists(xmltv_dir):
+                return
+
+            # Calculate cutoff time based on days parameter
+            cutoff_days = int(days) if days else 1
+            cutoff_time = time.time() - (cutoff_days * 24 * 3600)
+
+            entries = os.listdir(xmltv_dir)
+            for entry in entries:
+                if entry.startswith(f"{xmltv_basename}.") and entry.count('_') == 1:
+                    file_path = os.path.join(xmltv_dir, entry)
+                    try:
+                        file_mtime = os.path.getmtime(file_path)
+                        if file_mtime < cutoff_time:
+                            os.remove(file_path)
+                            logging.info('Deleted old XMLTV archive: %s', entry)
+                    except OSError as e:
+                        logging.warning('Error deleting old XMLTV archive %s: %s', entry, str(e))
+        except Exception as e:
+            logging.warning('Error cleaning old XMLTV archives: %s', str(e))
+
     def deleteOldCache(gridtimeStart):
         logging.info('Checking for old cache files...')
         try:
@@ -1273,6 +1363,9 @@ def mainRun(userdata):
 
     def xmltv():
         try:
+            # Archive current XMLTV file before creating new one
+            archiveXMLTV()
+
             enc = 'utf-8'
             outFile = os.path.join(userdata, os.environ.get('XMLTV'))
             fh = codecs.open(outFile, 'w+b', encoding=enc)
@@ -1609,6 +1702,13 @@ def mainRun(userdata):
     try:
         if not os.path.exists(cacheDir):
             os.mkdir(cacheDir)
+
+        # Define log file path for rotation functions
+        log_file = os.path.join(userdata, os.environ.get('LogFile'))
+
+        # Rotate log file if needed (before main processing)
+        rotateLogFile()
+
         count = 0
         gridtime = gridtimeStart
         if stationList is None:
@@ -1729,18 +1829,27 @@ if __name__ == '__main__':
     debug_enabled = os.environ.get('Debug', 'false').lower() == 'true'
     log_level = logging.DEBUG if debug_enabled else logging.INFO
 
-    logging.basicConfig(filename=log, filemode='w', format='%(asctime)s %(message)s',
+    # Use append mode for log rotation without interrupting tail -f
+    logging.basicConfig(filename=log, filemode='a', format='%(asctime)s %(message)s',
                        datefmt='%Y/%m/%d %H:%M:%S', level=log_level)
 
     if debug_enabled:
         logging.info('Debug logging enabled - verbose output will be shown')
 
+    # Add session separator in log
+    logging.info('=' * 60)
+    logging.info('zap2epg session started - Version %s', os.environ.get('VERSION', '4.0'))
+
     result = mainRun(userdata)
     if result is None or result == (None, None, None):
         logging.error('Script failed - exiting with error code')
+        logging.info('zap2epg session ended with error')
+        logging.info('=' * 60)
         sys.exit(1)
     else:
         logging.info('Script completed successfully')
+        logging.info('zap2epg session ended successfully')
+        logging.info('=' * 60)
         sys.exit(0)
 ----EOF
 
