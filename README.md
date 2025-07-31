@@ -8,7 +8,10 @@ zap2epg was originally designed to be easily setup in Kodi for use as a grabber 
 ## Key Features
 
 - **Intelligent Channel Filtering**: Automatically fetches your channel list from TVH to reduce data downloaded and speed up the grab
-- **Extended Program Details**: Optional downloading of extra detail information for programs with intelligent description enhancement
+- **Simplified Cache Management**: Smart cache system that preserves existing data and only downloads what's needed
+- **Intelligent Guide Refresh**: Refreshes first 48 hours while reusing cached data for later periods
+- **Safe Backup System**: Automatic XMLTV backup before generation with smart retention management
+- **Extended Program Details**: Optional downloading of extra detail information with optimized cache reuse
 - **Smart Configuration Management**: Automatically cleans deprecated settings and manages configuration versions
 - **Optimized Downloads**: WAF-protected downloads with adaptive delays and connection reuse
 - **Multi-Platform Support**: Intelligent detection and configuration for Raspberry Pi, Synology NAS, and standard Linux systems
@@ -105,7 +108,8 @@ The script offers two levels of program information:
 - Downloads additional series information, cast details, and enhanced descriptions
 - `xdetails=true`: Downloads extended data but uses basic descriptions
 - `xdesc=true`: Uses enhanced descriptions with intelligent formatting (automatically enables xdetails)
-- Note: Generates additional HTTP requests per unique series
+- **Intelligent Cache Reuse**: Only downloads details for new series, reuses existing cached data
+- Note: First run may require downloading 1000+ series details, subsequent runs are much faster
 
 ### Enhanced Description Format
 When `xdesc=true`, descriptions are intelligently formatted with:
@@ -116,6 +120,50 @@ When `xdesc=true`, descriptions are intelligently formatted with:
 - Program flags (NEW, LIVE, PREMIERE, etc.)
 
 Example: `"A documentary about gaming history. • (2023) | S01E02 | Premiered: 2023-03-15 | NEW"`
+
+### Extended Details Cache Efficiency
+The script intelligently manages series details cache:
+```
+Extended details processing completed:
+  Total unique series: 1137
+  Downloads attempted: 1           ← Only new series
+  Successful downloads: 1
+  Unique series from cache: 1136   ← Reused existing
+  Cache efficiency: 99.9% (1136/1137 unique series reused)
+```
+
+## Simplified Cache Management System
+
+The script features an intelligent cache management system that optimizes performance and storage:
+
+### Guide Cache (3-hour blocks)
+- **Smart Refresh Window**: Refreshes first 48 hours of guide data on each run
+- **Cache Reuse**: Reuses cached blocks outside refresh window to minimize downloads
+- **Safe Updates**: Creates backup before refreshing, restores if download fails
+- **Automatic Cleanup**: Removes blocks outside current guide period
+
+### XMLTV Backups
+- **Always Backup**: Creates timestamped backup before generating new XMLTV
+- **Smart Retention**: Keeps backups for guide duration (days parameter)
+- **Automatic Cleanup**: Removes old backups beyond retention period
+
+### Series Details Cache
+- **Preserve Existing**: Never deletes cached series details unless no longer needed
+- **Intelligent Cleanup**: Only removes details for series not in current guide
+- **Optimal Reuse**: Dramatically reduces download time on subsequent runs
+
+### Cache Statistics Example
+```
+=== Cache Cleanup ===
+Guide cache cleanup: 12 removed, 24 kept, 2 invalid blocks removed
+Show cache cleanup: 45 removed, 1092 kept
+XMLTV cleanup: 3 old backups removed (retention: 7 days)
+
+Guide download completed:
+  Blocks: 56 total (8 downloaded, 48 cached, 0 failed)
+  Cache efficiency: 85.7% reused
+  Success rate: 100.0%
+```
 
 ## System Auto-Detection
 
@@ -132,8 +180,14 @@ The script automatically detects your system type and configures appropriate dir
 ```
 /var/packages/tvheadend/var/epggrab/zap2epg/
 ├── cache/
+│   ├── xmltv.xml
+│   ├── xmltv.xml.20250731_143022 (backup)
+│   ├── 2025073100.json.gz (guide blocks)
+│   └── SH01234567.json (series details)
 ├── conf/
+│   └── zap2epg.xml
 └── log/
+    └── zap2epg.log
 ```
 
 **DSM6:**
@@ -226,19 +280,22 @@ su - hts -c "tv_grab_zap2epg --days 1 --zip 90210 --debug"
 ### Debug Mode
 Enable with `--debug` for detailed information:
 - Download statistics and timing
+- Cache efficiency metrics
 - WAF block detection and handling
 - Channel matching details
 - Description enhancement statistics
 - Configuration processing details
 
-### Cache Management
-- Automatic cleanup of old guide data
-- Intelligent cache reuse for extended details
-- Manual cache clearing: `tv_grab_zap2epg --clear-cache`
+### Performance Optimization
+- **First Run**: May take longer as series details are downloaded and cached
+- **Subsequent Runs**: Much faster due to intelligent cache reuse
+- **Refresh Strategy**: Only refreshes recent guide data (48 hours) while preserving older cached blocks
+- **Network Efficiency**: Minimizes API requests through smart caching
 
 ### Error Handling
 - Automatic retry with exponential backoff
 - WAF protection with adaptive delays
+- Safe backup/restore for failed downloads
 - Graceful degradation when TVH is unavailable
 - Comprehensive error logging
 
@@ -259,7 +316,20 @@ Enable with `--debug` for detailed information:
 **Missing descriptions:**
 - Enable extended details with `xdesc=true`
 - Check download statistics in logs
+- First run will download many series details (normal)
 - Verify internet connectivity for extended downloads
+
+**Slow performance:**
+- First run with extended details takes longer (normal)
+- Check cache efficiency in logs
+- Subsequent runs should be much faster
+- Consider reducing `days` parameter for testing
+
+### Performance Tips
+1. **Extended Details**: First run downloads 1000+ series details but subsequent runs reuse cache
+2. **Cache Management**: Script automatically maintains optimal cache size
+3. **Network Issues**: Script handles temporary network problems gracefully
+4. **Debug Mode**: Use `--debug` to monitor cache efficiency and download statistics
 
 ### Debug Logging
 ```bash
@@ -269,15 +339,54 @@ tv_grab_zap2epg --debug --days 1
 # Check log file location (varies by system)
 # Synology DSM7: /var/packages/tvheadend/var/epggrab/zap2epg/log/zap2epg.log
 # Docker: ~/zap2epg/log/zap2epg.log
+
+# Monitor real-time with tail
+tail -f ~/zap2epg/log/zap2epg.log
+```
+
+### Example Debug Output
+```
+=== Cache Cleanup ===
+Initial cache cleanup completed (show cache will be cleaned after parsing episodes)
+
+Starting optimized guide download
+  Refresh window: first 48 hours will be re-downloaded
+  Guide duration: 56 blocks (168 hours)
+
+Refreshing block: 2025-07-31 21:00-00:00 [REFRESH]
+  Refresh success: 2025073121.json.gz (124756 bytes)
+Using cached: 2025-08-01 00:00-03:00
+...
+
+Guide download completed:
+  Blocks: 56 total (8 downloaded, 48 cached, 0 failed)
+  Cache efficiency: 85.7% reused
+  Success rate: 100.0%
+
+=== Show Cache Cleanup ===
+Found 1137 active series in current schedule
+Show cache cleanup: 45 removed, 1092 kept
+
+Extended details processing completed:
+  Total unique series: 1137
+  Downloads attempted: 45
+  Successful downloads: 45
+  Unique series from cache: 1092
+  Cache efficiency: 96.0% (1092/1137 unique series reused)
 ```
 
 ## Version History
 
 ### Version 4.0
-- Intelligent TVheadend channel filtering (fixed)
-- Enhanced description system with intelligent formatting
-- Automated configuration management and cleanup
-- Multi-platform auto-detection
-- Optimized downloads with WAF protection
-- Comprehensive debug logging and statistics
-- Improved error handling and resilience
+- **Simplified Cache Management**: Intelligent cache system that preserves existing data
+- **Smart Guide Refresh**: Refreshes first 48 hours while reusing cached data
+- **Automatic XMLTV Backup**: Safe backup system with smart retention
+- **Optimized Series Details**: Dramatically improved cache reuse for extended details
+- **Enhanced Statistics**: Detailed cache efficiency and performance metrics
+- **Intelligent TVheadend channel filtering** (fixed)
+- **Enhanced description system** with intelligent formatting
+- **Automated configuration management** and cleanup
+- **Multi-platform auto-detection**
+- **Optimized downloads** with WAF protection
+- **Comprehensive debug logging** and statistics
+- **Improved error handling** and resilience
