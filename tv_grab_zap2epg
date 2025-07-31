@@ -1116,6 +1116,8 @@ def mainRun(userdata):
         episodeCount = 0
         basic_desc_count = 0
         enhanced_desc_count = 0
+        missing_desc_count = 0
+        missing_desc_programs = {}  # Track missing descriptions to avoid duplicates
 
         try:
             logging.info('Writing Episodes to xmltv.xml file...')
@@ -1174,11 +1176,17 @@ def mainRun(userdata):
                                         basic_desc_count += 1
                                         description_written = True
 
-                                # Log missing descriptions
+                                # Track missing descriptions (avoid duplicates)
                                 if not description_written:
-                                    logging.warning('No description available for: %s - %s',
-                                                  edict.get('epshow', 'Unknown'),
-                                                  edict.get('eptitle', ''))
+                                    missing_desc_count += 1
+                                    program_key = f"{edict.get('epshow', 'Unknown')} - {edict.get('eptitle', 'None')}"
+
+                                    if program_key in missing_desc_programs:
+                                        missing_desc_programs[program_key] += 1
+                                    else:
+                                        missing_desc_programs[program_key] = 1
+                                        # Only log detailed message once per program in debug mode
+                                        logging.debug('No description available for: %s', program_key)
 
                                 if edict['eplength'] is not None:
                                     fh.write('\t\t<length units="minutes">' + edict['eplength'] + '</length>\n')
@@ -1243,9 +1251,23 @@ def mainRun(userdata):
                         except Exception as e:
                             logging.exception('Error processing episode %s:', episode)
 
-            # Log statistics
+            # Log statistics with improved missing description reporting
             logging.info('Description statistics: Episodes=%d, Basic_desc=%d, Enhanced_desc=%d',
                         episodeCount, basic_desc_count, enhanced_desc_count)
+
+            # Report missing descriptions intelligently
+            if missing_desc_count > 0:
+                logging.info('Missing descriptions: %d episodes from %d unique programs',
+                           missing_desc_count, len(missing_desc_programs))
+
+                # In debug mode, show programs with multiple missing descriptions
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    repeated_programs = [(prog, count) for prog, count in missing_desc_programs.items() if count > 1]
+                    if repeated_programs:
+                        logging.debug('Programs with multiple missing descriptions:')
+                        for prog, count in sorted(repeated_programs, key=lambda x: x[1], reverse=True)[:10]:
+                            logging.debug('  %s (x%d)', prog, count)
+
         except Exception as e:
             logging.exception('Exception: printEpisodes')
 
