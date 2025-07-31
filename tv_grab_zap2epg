@@ -499,6 +499,237 @@ def mainRun(userdata):
     logging.info('\tCaching directory path: %s', cacheDir)
 
     # =========================================================================
+    # SIMPLIFIED CACHE MANAGEMENT SYSTEM
+    # =========================================================================
+
+    def get_standard_block_time(timestamp):
+        """Convert timestamp to standardized 3-hour block time (0,3,6,9,12,15,18,21)"""
+        dt = datetime.datetime.fromtimestamp(timestamp)
+        # Calculate standardized 3-hour block (0,3,6,9,12,15,18,21)
+        standard_hour = (dt.hour // 3) * 3
+        standard_dt = dt.replace(hour=standard_hour, minute=0, second=0, microsecond=0)
+        return standard_dt
+
+    def backupXMLTV(xmltv_file):
+        """XMLTV: Always backup previous version"""
+        try:
+            if os.path.exists(xmltv_file):
+                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                backup_file = f"{xmltv_file}.{timestamp}"
+
+                import shutil
+                shutil.copy2(xmltv_file, backup_file)
+                logging.info('XMLTV backed up: %s', os.path.basename(backup_file))
+                return backup_file
+            else:
+                logging.info('No existing XMLTV file to backup - first run')
+                return None
+        except Exception as e:
+            logging.warning('Error backing up XMLTV: %s', str(e))
+            return None
+
+    def cleanOldXMLTVBackups(xmltv_file, guide_days):
+        """XMLTV: Remove backups older than guide duration"""
+        try:
+            xmltv_dir = os.path.dirname(xmltv_file)
+            xmltv_basename = os.path.basename(xmltv_file)
+
+            if not os.path.exists(xmltv_dir):
+                return
+
+            # Keep backups for guide duration
+            cutoff_time = time.time() - (guide_days * 24 * 3600)
+
+            cleaned_count = 0
+            for entry in os.listdir(xmltv_dir):
+                if entry.startswith(f"{xmltv_basename}.") and '_' in entry:
+                    try:
+                        file_path = os.path.join(xmltv_dir, entry)
+                        if os.path.getmtime(file_path) < cutoff_time:
+                            os.remove(file_path)
+                            logging.debug('Deleted old XMLTV backup: %s', entry)
+                            cleaned_count += 1
+                    except OSError as e:
+                        logging.warning('Error deleting backup %s: %s', entry, str(e))
+
+            if cleaned_count > 0:
+                logging.info('XMLTV cleanup: %d old backups removed (retention: %d days)',
+                           cleaned_count, guide_days)
+
+        except Exception as e:
+            logging.warning('Error cleaning XMLTV backups: %s', str(e))
+
+    def calculateGuideTimeRange(gridtimeStart, guide_days):
+        """Calculate time range covered by the guide"""
+        guide_start = gridtimeStart
+        guide_end = gridtimeStart + (guide_days * 24 * 3600)
+
+        # Round to standard 3h blocks (0,3,6,9,12,15,18,21)
+        start_dt = get_standard_block_time(guide_start)
+        end_dt = get_standard_block_time(guide_end)
+
+        # Ensure we cover the complete range
+        if end_dt.timestamp() <= guide_end:
+            end_dt = end_dt + datetime.timedelta(hours=3)
+
+        return start_dt, end_dt
+
+    def cleanGuideCache(gridtimeStart, guide_days):
+        """Guide: Keep only blocks corresponding to target period"""
+        try:
+            logging.info('Cleaning guide cache: keeping blocks for %d days', guide_days)
+
+            # Calculate guide time range
+            guide_start_dt, guide_end_dt = calculateGuideTimeRange(gridtimeStart, guide_days)
+
+            logging.debug('Guide range: %s to %s',
+                         guide_start_dt.strftime('%Y-%m-%d %H:00'),
+                         guide_end_dt.strftime('%Y-%m-%d %H:00'))
+
+            if not os.path.exists(cacheDir):
+                return
+
+            cleaned_count = 0
+            kept_count = 0
+            invalid_count = 0
+
+            for entry in os.listdir(cacheDir):
+                # Process only guide block files (format: YYYYMMDDHH.json.gz)
+                if entry.endswith('.json.gz') and len(entry) == 15:  # YYYYMMDDHH.json.gz
+                    try:
+                        date_str = entry[:10]  # YYYYMMDDHH
+                        file_dt = datetime.datetime.strptime(date_str, '%Y%m%d%H')
+
+                        # Verify it's a valid 3h block (0,3,6,9,12,15,18,21)
+                        if file_dt.hour % 3 != 0:
+                            # Invalid block - remove
+                            os.remove(os.path.join(cacheDir, entry))
+                            logging.debug('Deleted invalid block: %s (hour %d)', entry, file_dt.hour)
+                            invalid_count += 1
+                            continue
+
+                        # Check if block is within guide range
+                        if guide_start_dt <= file_dt < guide_end_dt:
+                            # Keep
+                            kept_count += 1
+                            logging.debug('Keeping: %s', entry)
+                        else:
+                            # Remove - outside range
+                            os.remove(os.path.join(cacheDir, entry))
+                            logging.debug('Deleted out of range: %s', entry)
+                            cleaned_count += 1
+
+                    except (ValueError, OSError) as e:
+                        logging.warning('Error processing block %s: %s', entry, str(e))
+
+            total_processed = cleaned_count + kept_count + invalid_count
+            if total_processed > 0:
+                logging.info('Guide cache cleanup: %d removed, %d kept, %d invalid blocks removed',
+                            cleaned_count, kept_count, invalid_count)
+            else:
+                logging.info('No guide cache files found to process')
+
+        except Exception as e:
+            logging.warning('Error cleaning guide cache: %s', str(e))
+
+    def getActiveSeriesList():
+        """Extract list of active series from current schedule"""
+        active_series = set()
+        for station in schedule:
+            sdict = schedule[station]
+            for episode in sdict:
+                if not episode.startswith("ch"):
+                    edict = sdict[episode]
+                    if edict.get('epseries'):
+                        active_series.add(edict['epseries'])
+        return list(active_series)
+
+    def cleanShowCache(active_series_list=None):
+        """Show details: Keep only those still active in current xmltv.xml"""
+        try:
+            if not os.path.exists(cacheDir):
+                return
+
+            # Get active series list if not provided
+            if active_series_list is None:
+                active_series_list = getActiveSeriesList()
+
+            # Convert to set for fast lookup
+            active_series = set(active_series_list) if active_series_list else set()
+
+            cleaned_count = 0
+            kept_count = 0
+
+            for entry in os.listdir(cacheDir):
+                # Process show detail files (not guide blocks)
+                if entry.endswith('.json') and not entry.endswith('.json.gz'):
+                    series_id = entry.replace('.json', '')
+
+                    if series_id in active_series:
+                        kept_count += 1
+                        logging.debug('Show details kept: %s', series_id)
+                    else:
+                        try:
+                            os.remove(os.path.join(cacheDir, entry))
+                            logging.debug('Show details removed: %s', series_id)
+                            cleaned_count += 1
+                        except OSError as e:
+                            logging.warning('Error removing show details %s: %s', entry, str(e))
+
+            if cleaned_count > 0 or kept_count > 0:
+                logging.info('Show cache cleanup: %d removed, %d kept', cleaned_count, kept_count)
+
+        except Exception as e:
+            logging.warning('Error cleaning show cache: %s', str(e))
+
+    def validateAndSaveGuideBlock(content, filename):
+        """Validate and save a guide block"""
+        try:
+            # Validate JSON
+            json.loads(content)
+
+            # Save compressed
+            fileDir = os.path.join(cacheDir, filename)
+            with gzip.open(fileDir, "wb") as f:
+                f.write(content)
+
+            return True
+        except json.JSONDecodeError:
+            logging.warning('Invalid JSON received for %s', filename)
+            return False
+        except Exception as e:
+            logging.warning('Error saving %s: %s', filename, str(e))
+            return False
+
+    def performInitialCacheCleanup(gridtimeStart, guide_days):
+        """Perform initial cache cleanup (guide blocks and XMLTV backups only)"""
+        logging.info('=== Initial Cache Cleanup ===')
+
+        # 1. Clean guide cache - keep only blocks for target period
+        cleanGuideCache(gridtimeStart, guide_days)
+
+        # 2. Clean XMLTV backups - keep only for guide duration
+        xmltv_path = os.path.join(userdata, os.environ.get('XMLTV'))
+        cleanOldXMLTVBackups(xmltv_path, guide_days)
+
+        logging.info('Initial cache cleanup completed (show cache will be cleaned after parsing episodes)')
+
+    def performShowCacheCleanup():
+        """Clean show cache after episodes are parsed"""
+        logging.info('=== Show Cache Cleanup ===')
+
+        # Get current active series from parsed schedule
+        active_series = getActiveSeriesList()
+
+        if len(active_series) > 0:
+            logging.info('Found %d active series in current schedule', len(active_series))
+            cleanShowCache(active_series)
+        else:
+            logging.warning('No active series found - skipping show cache cleanup to preserve existing cache')
+
+        logging.info('Show cache cleanup completed')
+
+    # =========================================================================
     # SHARED CLASSES AND FUNCTIONS FOR OPTIMIZED DOWNLOADS
     # =========================================================================
 
@@ -815,6 +1046,140 @@ def mainRun(userdata):
 
     downloader.init_session()
 
+    def downloadGuideBlockSafe(gridtime, filename, url, refresh_hours=48):
+        """Safe download of guide block with automatic backup"""
+        fileDir = os.path.join(cacheDir, filename)
+        file_exists = os.path.exists(fileDir)
+
+        # Determine if refresh needed (first 36-48h)
+        time_from_now = gridtime - time.time()
+        force_refresh = time_from_now < (refresh_hours * 3600)
+
+        block_time = get_standard_block_time(gridtime)
+        block_end = (block_time.hour + 3) % 24
+        block_display = f"{block_time.strftime('%Y-%m-%d %H:00')}-{block_end:02d}:00"
+
+        if not file_exists:
+            # New block to download
+            logging.info('Downloading new block: %s', block_display)
+            content = downloader.download_with_retry(url, method='GET', timeout=8)
+
+            if content and validateAndSaveGuideBlock(content, filename):
+                logging.info('  Success: %s (%d bytes)', filename, len(content))
+                return True
+            else:
+                logging.warning('  Failed download: %s', filename)
+                return False
+
+        elif force_refresh:
+            # Existing block to refresh
+            logging.info('Refreshing block: %s [REFRESH]', block_display)
+
+            # Create temporary backup
+            backup_file = fileDir + '.backup_temp'
+            try:
+                import shutil
+                shutil.copy2(fileDir, backup_file)
+                logging.debug('  Backup created: %s', os.path.basename(backup_file))
+            except Exception as e:
+                logging.warning('  Cannot create backup: %s', str(e))
+                backup_file = None
+
+            # Download new version
+            content = downloader.download_with_retry(url, method='GET', timeout=8)
+
+            if content and validateAndSaveGuideBlock(content, filename):
+                # Success - remove backup
+                if backup_file and os.path.exists(backup_file):
+                    os.remove(backup_file)
+                logging.info('  Refresh success: %s (%d bytes)', filename, len(content))
+                return True
+            else:
+                # Failed - restore backup
+                if backup_file and os.path.exists(backup_file):
+                    import shutil
+                    shutil.move(backup_file, fileDir)
+                    logging.info('  Backup restored after failed refresh: %s', filename)
+                    return True  # We still have the file
+                else:
+                    logging.warning('  Refresh failed and no backup: %s', filename)
+                    return False
+        else:
+            # Use cached version
+            logging.debug('Using cached: %s', block_display)
+            return True
+
+    def optimizedGuideDownload(gridtimeStart, dayHours, refreshHours=48):
+        """Optimized guide download with intelligent caching"""
+
+        logging.info('Starting optimized guide download')
+        logging.info('  Refresh window: first %d hours will be re-downloaded', refreshHours)
+        logging.info('  Guide duration: %d blocks (%d hours)', dayHours, dayHours * 3)
+
+        downloaded_count = 0
+        cached_count = 0
+        failed_count = 0
+
+        count = 0
+        gridtime = gridtimeStart
+
+        while count < dayHours:
+            # Generate standardized filename
+            standard_block_time = get_standard_block_time(gridtime)
+            filename = standard_block_time.strftime('%Y%m%d%H') + '.json.gz'
+
+            # Build download URL
+            url = ('http://tvlistings.gracenote.com/api/grid?aid=orbebb&TMSID=&AffiliateID=lat&FromPage=TV%20Grid&lineupId=&timespan=3&headendId=' +
+                   str(lineupcode) + '&country=' + str(country) + '&device=' + str(device) + '&postalCode=' +
+                   str(zipcode) + '&time=' + str(int(gridtime)) + '&isOverride=true&pref=-&userId=-')
+
+            # Track download status
+            was_downloaded = False
+
+            # Download block safely
+            if downloadGuideBlockSafe(gridtime, filename, url, refreshHours):
+                # Determine if it was downloaded or cached
+                time_from_now = gridtime - time.time()
+                if time_from_now < (refreshHours * 3600):
+                    # In refresh window - likely downloaded
+                    downloaded_count += 1
+                    was_downloaded = True
+                else:
+                    # Outside refresh window - likely cached
+                    cached_count += 1
+            else:
+                failed_count += 1
+
+            # Parse the file (cached or new)
+            fileDir = os.path.join(cacheDir, filename)
+            if os.path.exists(fileDir):
+                try:
+                    with gzip.open(fileDir, 'rb') as f:
+                        content = f.read()
+                    logging.debug('Parsing %s', filename)
+
+                    if count == 0:
+                        parseStations(content)
+                    parseEpisodes(content)
+
+                except Exception as e:
+                    logging.warning('Parse error for %s: %s', filename, str(e))
+
+            count += 1
+            gridtime = gridtime + 10800  # Next 3-hour block
+
+        # Summary
+        total_blocks = dayHours
+        success_rate = ((downloaded_count + cached_count) / total_blocks * 100) if total_blocks > 0 else 0
+
+        logging.info('Guide download completed:')
+        logging.info('  Blocks: %d total (%d downloaded, %d cached, %d failed)',
+                    total_blocks, downloaded_count, cached_count, failed_count)
+        logging.info('  Cache efficiency: %.1f%% reused', (cached_count/total_blocks*100) if total_blocks > 0 else 0)
+        logging.info('  Success rate: %.1f%%', success_rate)
+
+        return success_rate >= 80  # Consider successful if 80%+ blocks available
+
     def tvhMatchGet():
         try:
             tvhUrlBase = 'http://' + tvhurl + ":" + tvhport
@@ -839,213 +1204,6 @@ def mainRun(userdata):
             logging.warning('Cannot connect to Tvheadend: %s', str(e))
             logging.info('Continuing without Tvheadend channel matching...')
             pass
-
-    def get_standard_block_time(timestamp):
-        """Convert timestamp to standardized 3-hour block time (0,3,6,9,12,15,18,21)"""
-        dt = datetime.datetime.fromtimestamp(timestamp)
-        # Calculate standardized 3-hour block (0,3,6,9,12,15,18,21)
-        standard_hour = (dt.hour // 3) * 3
-        standard_dt = dt.replace(hour=standard_hour, minute=0, second=0, microsecond=0)
-        return standard_dt
-
-    def rotateLogFile():
-        """Rotate log file without interrupting tail -f"""
-        try:
-            if os.path.exists(log_file):
-                file_size = os.path.getsize(log_file)
-                # Rotate if log file is larger than 5MB
-                if file_size > 5 * 1024 * 1024:
-                    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-                    rotated_log = f"{log_file}.{timestamp}"
-
-                    # Move current log to timestamped version
-                    os.rename(log_file, rotated_log)
-                    logging.info('Log rotated to: %s', os.path.basename(rotated_log))
-
-                    # Clean old log files based on guide days parameter
-                    cleanOldLogs()
-        except Exception as e:
-            logging.warning('Error rotating log file: %s', str(e))
-
-    def cleanOldLogs():
-        """Clean old log files older than guide days parameter"""
-        try:
-            log_dir = os.path.dirname(log_file)
-            if not os.path.exists(log_dir):
-                return
-
-            # Calculate cutoff time based on days parameter
-            cutoff_days = int(days) if days else 1
-            cutoff_time = time.time() - (cutoff_days * 24 * 3600)
-
-            entries = os.listdir(log_dir)
-            for entry in entries:
-                if entry.startswith('zap2epg.log.') and entry.count('_') == 1:
-                    file_path = os.path.join(log_dir, entry)
-                    try:
-                        file_mtime = os.path.getmtime(file_path)
-                        if file_mtime < cutoff_time:
-                            os.remove(file_path)
-                            logging.info('Deleted old log: %s', entry)
-                    except OSError as e:
-                        logging.warning('Error deleting old log %s: %s', entry, str(e))
-        except Exception as e:
-            logging.warning('Error cleaning old logs: %s', str(e))
-
-    def archiveXMLTV():
-        """Archive current XMLTV file before creating new one"""
-        try:
-            xmltv_file = os.path.join(userdata, os.environ.get('XMLTV'))
-            if os.path.exists(xmltv_file):
-                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-                archived_xml = f"{xmltv_file}.{timestamp}"
-
-                # Copy current XMLTV to archived version
-                import shutil
-                shutil.copy2(xmltv_file, archived_xml)
-                logging.info('XMLTV archived to: %s', os.path.basename(archived_xml))
-
-                # Clean old XMLTV archives
-                cleanOldXMLTV()
-        except Exception as e:
-            logging.warning('Error archiving XMLTV file: %s', str(e))
-
-    def cleanOldXMLTV():
-        """Clean old XMLTV archives older than guide days parameter"""
-        try:
-            xmltv_file = os.path.join(userdata, os.environ.get('XMLTV'))
-            xmltv_dir = os.path.dirname(xmltv_file)
-            xmltv_basename = os.path.basename(xmltv_file)
-
-            if not os.path.exists(xmltv_dir):
-                return
-
-            # Calculate cutoff time based on days parameter
-            cutoff_days = int(days) if days else 1
-            cutoff_time = time.time() - (cutoff_days * 24 * 3600)
-
-            entries = os.listdir(xmltv_dir)
-            for entry in entries:
-                if entry.startswith(f"{xmltv_basename}.") and entry.count('_') == 1:
-                    file_path = os.path.join(xmltv_dir, entry)
-                    try:
-                        file_mtime = os.path.getmtime(file_path)
-                        if file_mtime < cutoff_time:
-                            os.remove(file_path)
-                            logging.info('Deleted old XMLTV archive: %s', entry)
-                    except OSError as e:
-                        logging.warning('Error deleting old XMLTV archive %s: %s', entry, str(e))
-        except Exception as e:
-            logging.warning('Error cleaning old XMLTV archives: %s', str(e))
-
-    def deleteOldCache(gridtimeStart):
-        """Delete old cache files using standardized 3-hour block naming system"""
-        logging.info('Cleaning old cache files (standardized 3-hour block system: 0,3,6,9,12,15,18,21)...')
-        try:
-            if os.path.exists(cacheDir):
-                entries = os.listdir(cacheDir)
-                cleaned_count = 0
-                kept_count = 0
-                invalid_count = 0
-
-                # Calculate cutoff date based on redays parameter with safety margin
-                cutoff_days = int(redays) + 1  # Keep 1 extra day for safety
-                cutoff_timestamp = gridtimeStart - (cutoff_days * 24 * 3600)
-                cutoff_date = datetime.datetime.fromtimestamp(cutoff_timestamp)
-
-                logging.debug('Cache cleanup: keeping files newer than %s', cutoff_date.strftime('%Y-%m-%d %H:00'))
-
-                for entry in entries:
-                    # Handle new standardized block format (YYYYMMDDHH.json.gz where HH is 0,3,6,9,12,15,18,21)
-                    if entry.endswith('.json.gz') and len(entry) == 15:  # YYYYMMDDHH.json.gz = 15 chars
-                        try:
-                            date_str = entry[:10]  # YYYYMMDDHH
-                            file_date = datetime.datetime.strptime(date_str, '%Y%m%d%H')
-
-                            # Validate that it's a proper 3-hour block (0,3,6,9,12,15,18,21)
-                            if file_date.hour % 3 == 0:
-                                if file_date < cutoff_date:
-                                    fn = os.path.join(cacheDir, entry)
-                                    os.remove(fn)
-                                    block_end = (file_date.hour + 3) % 24
-                                    logging.debug('Deleted old cache: %s (%s-%02d:00)',
-                                                entry, file_date.strftime('%Y-%m-%d %H:00'), block_end)
-                                    cleaned_count += 1
-                                else:
-                                    kept_count += 1
-                                    logging.debug('Keeping recent cache: %s', entry)
-                            else:
-                                # Invalid block hour - remove it
-                                fn = os.path.join(cacheDir, entry)
-                                os.remove(fn)
-                                logging.debug('Deleted invalid block cache: %s (hour %d not in 3h blocks)',
-                                            entry, file_date.hour)
-                                invalid_count += 1
-
-                        except (ValueError, OSError) as e:
-                            logging.warning('Error processing cache file %s: %s', entry, str(e))
-
-                    # Handle old timestamp format for backward compatibility
-                    elif entry.endswith('.json.gz'):
-                        oldfile = entry.split('.')[0]
-                        if oldfile.isdigit():
-                            try:
-                                if int(oldfile) < cutoff_timestamp:
-                                    fn = os.path.join(cacheDir, entry)
-                                    os.remove(fn)
-                                    logging.debug('Deleted old timestamp cache: %s', entry)
-                                    cleaned_count += 1
-                                else:
-                                    kept_count += 1
-                            except (ValueError, OSError) as e:
-                                logging.warning('Error processing timestamp cache %s: %s', entry, str(e))
-
-                    # Clean up temporary/archived files (*.old_* pattern)
-                    elif '.old_' in entry:
-                        try:
-                            fn = os.path.join(cacheDir, entry)
-                            file_age = time.time() - os.path.getmtime(fn)
-                            if file_age > 86400:  # Remove archived files older than 24h
-                                os.remove(fn)
-                                logging.debug('Deleted old archived file: %s', entry)
-                                cleaned_count += 1
-                        except OSError as e:
-                            logging.warning('Error deleting archived file %s: %s', entry, str(e))
-
-                total_processed = cleaned_count + kept_count + invalid_count
-                if total_processed > 0:
-                    logging.info('Cache cleanup completed: %d old files removed, %d files kept, %d invalid blocks removed',
-                               cleaned_count, kept_count, invalid_count)
-                else:
-                    logging.info('No cache files found to process')
-
-        except Exception as e:
-            logging.warning('Error during cache cleanup: %s', str(e))
-
-    def deleteOldShowCache(showList):
-        """Delete old show cache files only after successful new downloads"""
-        logging.info('Cleaning old show cache files (preserving active series)...')
-        try:
-            if os.path.exists(cacheDir):
-                entries = os.listdir(cacheDir)
-                cleaned_count = 0
-                for entry in entries:
-                    oldfile = entry.split('.')[0]
-                    if not oldfile.isdigit():  # Show cache files (not timestamp files)
-                        fn = os.path.join(cacheDir, entry)
-                        if oldfile not in showList:
-                            try:
-                                os.remove(fn)
-                                logging.debug('Deleted old show cache: %s', entry)
-                                cleaned_count += 1
-                            except OSError as e:
-                                logging.warning('Error deleting show cache %s: %s', entry, str(e))
-                if cleaned_count > 0:
-                    logging.info('Cleaned %d old show cache files', cleaned_count)
-                else:
-                    logging.info('No old show cache files to clean')
-        except Exception as e:
-            logging.warning('Error during show cache cleanup: %s', str(e))
 
     def convTime(t):
         return time.strftime("%Y%m%d%H%M%S",time.localtime(int(t)))
@@ -1146,7 +1304,7 @@ def mainRun(userdata):
     def printHeader(fh, enc):
         logging.info('Creating xmltv.xml file...')
         fh.write("<?xml version=\"1.0\" encoding=\""+ enc + "\"?>\n")
-        fh.write("<!DOCTYPE tv SYSTEM \"xmltv.dtd\">\n\n")
+        fh.write("<!DOCTYPE tv SYSTEM \"xmltv.dtd\">\n")
         fh.write("<tv source-info-url=\"http://tvschedule.gracenote.com/\" source-info-name=\"gracenote.com\">\n")
 
     def printFooter(fh):
@@ -1442,21 +1600,35 @@ def mainRun(userdata):
         except Exception as e:
             logging.exception('Exception: printEpisodes')
 
-    def xmltv():
+    def xmltvWithBackup():
+        """Generate XMLTV with automatic backup"""
         try:
-            # Archive current XMLTV file before creating new one
-            archiveXMLTV()
+            userdata_path = os.getcwd()
+            xmltv_path = os.path.join(userdata_path, os.environ.get('XMLTV'))
 
+            logging.info('=== XMLTV Generation ===')
+
+            # Always backup existing XMLTV
+            backupXMLTV(xmltv_path)
+
+            # Generate new XMLTV
             enc = 'utf-8'
-            outFile = os.path.join(userdata, os.environ.get('XMLTV'))
-            fh = codecs.open(outFile, 'w+b', encoding=enc)
+            fh = codecs.open(xmltv_path, 'w+b', encoding=enc)
             printHeader(fh, enc)
             printStations(fh)
             printEpisodes(fh)
             printFooter(fh)
             fh.close()
+
+            # Verify and log result
+            if os.path.exists(xmltv_path):
+                file_size = os.path.getsize(xmltv_path)
+                logging.info('XMLTV file created: %s (%d bytes)', os.path.basename(xmltv_path), file_size)
+            else:
+                logging.error('XMLTV file was not created: %s', xmltv_path)
+
         except Exception as e:
-            logging.exception('Exception: xmltv')
+            logging.exception('Exception in XMLTV generation: %s', str(e))
 
     def parseStations(content):
         try:
@@ -1464,20 +1636,20 @@ def mainRun(userdata):
             for station in ch_guide['channels']:
                 skey = station.get('channelId')
 
-                # NOUVELLE LOGIQUE: Déterminer si cette station doit être traitée
+                # Determine if this station should be processed
                 should_process_station = False
 
                 if stationList is not None and len(stationList) > 0:
-                    # Utiliser la liste explicite de stations
+                    # Use explicit station list
                     should_process_station = skey in stationList
                     logging.debug('Using explicit station list: %s in list = %s', skey, should_process_station)
                 elif tvhmatch and len(tvhMatchDict) > 0:
-                    # Utiliser les chaînes Tvheadend comme filtre
+                    # Use Tvheadend channels as filter
                     chNum = station.get('channelNo', '')
                     chSign = station.get('callSign', '')
 
-                    # Vérifier si le numéro de chaîne correspond à une chaîne Tvheadend
-                    # Tester différents formats possibles
+                    # Check if channel number matches a Tvheadend channel
+                    # Test different possible formats
                     possible_numbers = [chNum]
                     if '.' not in chNum and chmatch and chSign:
                         chsub = re.search(r'(\d+)$', chSign)
@@ -1496,7 +1668,7 @@ def mainRun(userdata):
                     if not should_process_station:
                         logging.debug('Station %s (channel %s, callsign %s) not found in Tvheadend - skipping', skey, chNum, chSign)
                 else:
-                    # Pas de filtrage - prendre toutes les stations
+                    # No filtering - take all stations
                     should_process_station = True
 
                 if should_process_station:
@@ -1530,7 +1702,7 @@ def mainRun(userdata):
             for station in ch_guide['channels']:
                 skey = station.get('channelId')
 
-                # MÊME LOGIQUE que dans parseStations
+                # Same logic as in parseStations
                 should_process_station = False
 
                 if stationList is not None and len(stationList) > 0:
@@ -1556,7 +1728,7 @@ def mainRun(userdata):
 
                 if should_process_station:
                     episodes = station.get('events')
-                    if episodes:  # Vérifier que episodes n'est pas None
+                    if episodes:  # Check that episodes is not None
                         for episode in episodes:
                             epkey = str(calendar.timegm(time.strptime(episode.get('startTime'), '%Y-%m-%dT%H:%M:%SZ')))
                             schedule[skey][epkey] = {}
@@ -1610,23 +1782,14 @@ def mainRun(userdata):
             logging.exception('Exception: parseEpisodes')
         return CheckTBA
 
-    def genShowList():
-        showList = []
-        for station in schedule:
-            sdict = schedule[station]
-            for episode in sdict:
-                if not episode.startswith("ch"):
-                    edict = sdict[episode]
-                    if edict.get('epseries'):
-                        showList.append(edict['epseries'])
-        return showList
-
     def parseXdetails():
         """Download and parse extended program details - returns success status"""
         showList = []
         failList = []
         download_count = 0
         success_count = 0
+        cached_series = set()  # Track unique series used from cache
+        total_usages = 0       # Track total cache file usages
 
         logging.info('Starting extended details download using optimized session')
 
@@ -1648,6 +1811,7 @@ def mainRun(userdata):
 
                         try:
                             if not os.path.exists(fileDir):
+                                # Need to download new details
                                 download_count += 1
 
                                 url = 'https://tvlistings.gracenote.com/api/program/overviewDetails'
@@ -1682,6 +1846,11 @@ def mainRun(userdata):
                                 else:
                                     logging.warning('  Failed to download details for: %s', EPseries)
                                     failList.append(EPseries)
+                            else:
+                                # Use existing cached file
+                                cached_series.add(EPseries)  # Track unique cached series
+                                total_usages += 1             # Track total cache usages
+                                logging.debug('Using cached details for: %s', EPseries)
 
                             # Parse downloaded or cached file
                             if os.path.exists(fileDir):
@@ -1767,15 +1936,25 @@ def mainRun(userdata):
 
             # Final statistics
             stats = downloader.get_stats()
-            logging.info('Extended details download completed:')
+            total_series = len(set(showList))  # Remove duplicates for counting
+            unique_cached = len(cached_series)
+
+            logging.info('Extended details processing completed:')
+            logging.info('  Total unique series: %d', total_series)
             logging.info('  Downloads attempted: %d', download_count)
             logging.info('  Successful downloads: %d', success_count)
+            logging.info('  Unique series from cache: %d', unique_cached)
+            logging.info('  Total cache file usages: %d', total_usages)
             logging.info('  Failed downloads: %d', len(failList))
             logging.info('  WAF blocks during details: %d', stats['waf_blocks'])
 
-            # Calculate success rate
+            # Calculate success rate and cache efficiency
             success_rate = (success_count / download_count * 100) if download_count > 0 else 100
-            logging.info('  Success rate: %.1f%%', success_rate)
+            cache_efficiency = (unique_cached / total_series * 100) if total_series > 0 else 0
+
+            logging.info('  Download success rate: %.1f%%', success_rate)
+            logging.info('  Cache efficiency: %.1f%% (%d/%d unique series reused)',
+                        cache_efficiency, unique_cached, total_series)
 
             if failList:
                 logging.info('  Failed series (first 10): %s', ', '.join(failList[:10]))
@@ -1791,12 +1970,6 @@ def mainRun(userdata):
         if not os.path.exists(cacheDir):
             os.mkdir(cacheDir)
 
-        # Define log file path for rotation functions
-        log_file = os.path.join(userdata, os.environ.get('LogFile'))
-
-        # Rotate log file if needed (before main processing)
-        rotateLogFile()
-
         count = 0
         gridtime = gridtimeStart
         if stationList is None:
@@ -1804,7 +1977,7 @@ def mainRun(userdata):
         if tvhoff and tvhmatch:
             tvhMatchGet()
 
-        # CORRECTION: Ajouter des logs pour debug après tvhMatchGet
+        # Add debug logs after tvhMatchGet
         if tvhmatch and len(tvhMatchDict) > 0:
             logging.info('Tvheadend channel filtering enabled: %d channels will be used as filter', len(tvhMatchDict))
             logging.debug('Tvheadend channels: %s', list(tvhMatchDict.keys())[:10])  # Show first 10 for debug
@@ -1813,210 +1986,44 @@ def mainRun(userdata):
         else:
             logging.info('No channel filtering - all available stations will be processed')
 
-        # OPTIMIZED MAIN GUIDE DOWNLOAD with intelligent cache reuse
-        logging.info('Starting main guide download with intelligent cache management')
-        logging.info('Using standardized 3-hour blocks (00-03-06-09-12-15-18-21) for consistent cache names')
-        guide_download_start = time.time()
+        # =========================================================================
+        # MAIN PROCESS WITH SIMPLIFIED CACHE MANAGEMENT
+        # =========================================================================
 
-        # Keep track of downloads and cache usage
-        downloaded_files = []
-        cached_files = []
-        failed_downloads = []
-        forced_updates = []
+        # 1. Initial cache cleanup (guide blocks and XMLTV backups only)
+        performInitialCacheCleanup(gridtimeStart, int(days))
 
-        # Calculate refresh window (force download for recent data)
-        refresh_hours = 48  # Force refresh for first 48 hours
-        refresh_cutoff = gridtimeStart + (refresh_hours * 3600)
+        # 2. Download guide with intelligent caching
+        guide_success = optimizedGuideDownload(gridtimeStart, dayHours, refreshHours=48)
 
-        while count < dayHours:
-            # Generate filename based on standardized 3-hour blocks (0,3,6,9,12,15,18,21)
-            standard_block_time = get_standard_block_time(gridtime)
-            filename = standard_block_time.strftime('%Y%m%d%H') + '.json.gz'
-            fileDir = os.path.join(cacheDir, filename)
+        if not guide_success:
+            logging.warning('Guide download had issues, but continuing with available data')
 
-            # Determine if we should force refresh this time slot
-            force_refresh = gridtime < refresh_cutoff
-            file_exists = os.path.exists(fileDir)
+        # 3. Clean show cache now that we have parsed episodes and know which series are active
+        performShowCacheCleanup()
 
-            if force_refresh and file_exists:
-                # Archive old version before refreshing recent data
-                try:
-                    archived_name = filename.replace('.json.gz', f'.old_{int(time.time())}.json.gz')
-                    archived_path = os.path.join(cacheDir, archived_name)
-                    os.rename(fileDir, archived_path)
-                    logging.debug('Archived %s for refresh (within %dh window)', filename, refresh_hours)
-                    forced_updates.append(filename)
-                except Exception as e:
-                    logging.warning('Error archiving %s: %s', filename, str(e))
-
-            if not os.path.exists(fileDir) or force_refresh:
-                # Build download URL
-                url = ('http://tvlistings.gracenote.com/api/grid?aid=orbebb&TMSID=&AffiliateID=lat&FromPage=TV%20Grid&lineupId=&timespan=3&headendId=' +
-                       str(lineupcode) + '&country=' + str(country) + '&device=' + str(device) + '&postalCode=' +
-                       str(zipcode) + '&time=' + str(int(gridtime)) + '&isOverride=true&pref=-&userId=-')
-
-                refresh_indicator = " [FORCED REFRESH]" if force_refresh else ""
-                block_display = standard_block_time.strftime('%Y-%m-%d %H:00') + f"-{(standard_block_time.hour + 3) % 24:02d}:00"
-                logging.info('Downloading guide data for: %s (%s)%s',
-                           block_display, filename, refresh_indicator)
-                logging.debug('  URL: %s', url)
-
-                # Use optimized downloader
-                content = downloader.download_with_retry(url, method='GET', timeout=8)
-
-                if content:
-                    try:
-                        # Check that it's valid JSON
-                        json.loads(content)
-                        # Save in gzip format
-                        savepage(filename, content)
-                        logging.info('  Successfully downloaded: %s (%d bytes)', filename, len(content))
-                        downloaded_files.append(filename)
-
-                        # Clean up archived version if download successful
-                        if force_refresh:
-                            try:
-                                archived_name = filename.replace('.json.gz', f'.old_{int(time.time())}.json.gz')
-                                archived_path = os.path.join(cacheDir, archived_name)
-                                if os.path.exists(archived_path):
-                                    os.remove(archived_path)
-                                    logging.debug('Removed archived version after successful refresh')
-                            except:
-                                pass
-
-                    except json.JSONDecodeError:
-                        logging.warning('  Invalid JSON received for %s', filename)
-                        failed_downloads.append(filename)
-
-                        # Restore archived version if refresh failed
-                        if force_refresh:
-                            try:
-                                archived_name = filename.replace('.json.gz', f'.old_{int(time.time())}.json.gz')
-                                archived_path = os.path.join(cacheDir, archived_name)
-                                if os.path.exists(archived_path):
-                                    os.rename(archived_path, fileDir)
-                                    logging.info('Restored archived version after failed refresh')
-                            except:
-                                pass
-
-                    except Exception as e:
-                        logging.warning('  Error saving guide %s: %s', filename, str(e))
-                        failed_downloads.append(filename)
-                else:
-                    logging.warning('  Failed to download guide data for: %s', filename)
-                    failed_downloads.append(filename)
-
-                    # Restore archived version if refresh failed
-                    if force_refresh:
-                        try:
-                            archived_name = filename.replace('.json.gz', f'.old_{int(time.time())}.json.gz')
-                            archived_path = os.path.join(cacheDir, archived_name)
-                            if os.path.exists(archived_path):
-                                os.rename(archived_path, fileDir)
-                                logging.info('Restored archived version after failed download')
-                        except:
-                            pass
-            else:
-                logging.debug('Using cached guide: %s', filename)
-                cached_files.append(filename)
-
-            # Parse downloaded or cached file
-            if os.path.exists(fileDir):
-                try:
-                    with gzip.open(fileDir, 'rb') as f:
-                        content = f.read()
-                        f.close()
-                    logging.info('Parsing %s', filename)
-                    if count == 0:
-                        parseStations(content)
-                    TBAcheck = parseEpisodes(content)
-
-                    # Handle TBA listings more intelligently
-                    if TBAcheck == "Unsafe":
-                        if force_refresh:
-                            # For recent data, try to keep the file and just log the issue
-                            logging.warning('TBA listings found in recent data %s - keeping file for now', filename)
-                        else:
-                            # For older data, remove TBA files as before
-                            try:
-                                os.remove(fileDir)
-                                logging.info('Deleting %s due to TBA listings (older data)', filename)
-                                if filename in downloaded_files:
-                                    downloaded_files.remove(filename)
-                                if filename in cached_files:
-                                    cached_files.remove(filename)
-                                failed_downloads.append(filename)
-                            except OSError as e:
-                                logging.warning('Error deleting: %s - %s.', e.filename, e.strerror)
-
-                except Exception as e:
-                    logging.warning('JSON file error for: %s - handling gracefully', filename)
-                    if not force_refresh:  # Only delete non-recent files
-                        try:
-                            os.remove(fileDir)
-                            if filename in downloaded_files:
-                                downloaded_files.remove(filename)
-                            if filename in cached_files:
-                                cached_files.remove(filename)
-                            failed_downloads.append(filename)
-                        except:
-                            pass
-                    else:
-                        logging.warning('Keeping problematic recent file %s for manual review', filename)
-
-            count += 1
-            gridtime = gridtime + 10800
-
-        guide_download_time = time.time() - guide_download_start
-        stats = downloader.get_stats()
-
-        # Report detailed download statistics
-        total_expected = dayHours
-        downloaded_count = len(downloaded_files)
-        cached_count = len(cached_files)
-        failed_count = len(failed_downloads)
-        forced_count = len(forced_updates)
-
-        logging.info('Main guide download completed in %.1fs', guide_download_time)
-        logging.info('  Guide blocks: %d total (%d downloaded, %d cached, %d failed)',
-                    total_expected, downloaded_count, cached_count, failed_count)
-        logging.info('  Recent data refreshed: %d blocks (within %dh window)', forced_count, refresh_hours)
-        logging.info('  Cache efficiency: %.1f%% reused', (cached_count/total_expected*100) if total_expected > 0 else 0)
-        logging.info('  Guide requests: %d, WAF blocks: %d', downloaded_count + forced_count, stats['waf_blocks'])
-
-        # More lenient success criteria since we have cache fallback
-        success_rate = ((downloaded_count + cached_count) / total_expected * 100) if total_expected > 0 else 0
-        if success_rate >= 70:  # Lower threshold since cached data is acceptable
-            logging.info('Guide success rate %.1f%% - will clean old cache files after processing', success_rate)
-            should_clean_cache = True
-        else:
-            logging.warning('Guide success rate %.1f%% too low - preserving all cache files', success_rate)
-            should_clean_cache = False
-            if failed_downloads:
-                logging.warning('Failed downloads: %s', ', '.join(failed_downloads[:5]))
-
-        showList = genShowList()
-
-        # Download extended details if needed
-        extended_success = True
+        # 4. Download extended details if needed (only for missing series)
         if need_extended_download:
-            logging.info('Extended details download enabled (xdetails=%s, xdesc=%s)', xdetails, xdesc)
             extended_success = parseXdetails()
-        else:
-            logging.info('Extended details disabled - using basic program information only')
+            if not extended_success:
+                logging.warning('Extended details download had issues, using basic descriptions')
 
-        # Clean caches only if downloads were successful
-        if should_clean_cache and extended_success:
-            logging.info('All downloads successful - cleaning old cache files')
-            deleteOldCache(gridtimeStart)
-            deleteOldShowCache(showList)
-        elif should_clean_cache:
-            logging.info('Guide successful but extended details had issues - cleaning guide cache only')
-            deleteOldCache(gridtimeStart)
-        else:
-            logging.info('Preserving all cache files due to download issues')
-        xmltv()
-        timeRun = round((time.time() - pythonStartTime),2)
+        # 5. Generate XMLTV with backup
+        xmltvWithBackup()
+
+        # 6. Final show cache cleanup after successful XMLTV generation
+        xmltv_path = os.path.join(os.getcwd(), os.environ.get('XMLTV'))
+        if os.path.exists(xmltv_path):
+            # Final cleanup to ensure cache exactly matches final XMLTV content
+            final_active_series = getActiveSeriesList()
+            if len(final_active_series) > 0:
+                cleanShowCache(final_active_series)
+                logging.info('Final show cache verification: keeping %d active series', len(final_active_series))
+            else:
+                logging.warning('No series found in final XMLTV - preserving existing show cache')
+
+        # Final cleanup and statistics
+        timeRun = round((time.time() - pythonStartTime), 2)
         logging.info('zap2epg completed in %s seconds. ', timeRun)
         logging.info('%s Stations and %s Episodes written to xmltv.xml file.', str(stationCount), str(episodeCount))
 
@@ -2150,22 +2157,6 @@ export VERSION
 [ "$Days" ] && export Days
 [ "$Offset" ] && export Offset
 [ "$ZipCode" ] && export ZipCode
-
-# Debug: Display environment variables
-echo "DEBUG: Environment variables:" >&2
-echo "  CacheDir=$CacheDir" >&2
-echo "  ConfFile=$ConfFile" >&2
-echo "  LogFile=$LogFile" >&2
-echo "  ZipCode=$ZipCode" >&2
-echo "  Days=$Days" >&2
-
-# Optional: Clear cache to force new download
-if [ "$1" = "--clear-cache" ]; then
-    echo "Clearing cache directory..." >&2
-    rm -f "$CacheDir"/*.json.gz
-    rm -f "$CacheDir"/*.json
-    shift
-fi
 
 # Generate XMLTV file
 zap2epg
