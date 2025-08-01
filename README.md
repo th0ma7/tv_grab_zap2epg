@@ -12,9 +12,7 @@ zap2epg was originally designed to be easily setup in Kodi for use as a grabber 
 - **Intelligent Guide Refresh**: Refreshes first 48 hours while reusing cached data for later periods
 - **Safe Backup System**: Automatic XMLTV backup before generation with smart retention management
 - **Extended Program Details**: Optional downloading of extra detail information with optimized cache reuse
-- **Smart Configuration Management**: Automatically cleans deprecated settings and manages configuration versions
 - **Optimized Downloads**: WAF-protected downloads with adaptive delays and connection reuse
-- **Multi-Platform Support**: Intelligent detection and configuration for Raspberry Pi, Synology NAS, and standard Linux systems
 - **Enhanced Logging**: Debug mode with detailed statistics and intelligent error reporting
 
 _Note that zap2epg is a proof of concept and is for personal experimentation only. It is not meant to be used in a commercial product and its use is your own responsibiility._
@@ -148,9 +146,7 @@ The script features an intelligent cache management system that optimizes perfor
 - **Automatic Cleanup**: Removes old backups beyond retention period
 
 ### Series Details Cache
-- **Preserve Existing**: Never deletes cached series details unless no longer needed
-- **Intelligent Cleanup**: Only removes details for series not in current guide
-- **Optimal Reuse**: Dramatically reduces download time on subsequent runs
+- **Optimal Reuse**: Reuse cached series details to reduces download time on subsequent runs
 
 ### Cache Statistics Example
 ```
@@ -214,25 +210,6 @@ The script automatically:
 - **Creates backups** only when modifications are needed
 - **Preserves your settings** while cleaning obsolete parameters
 
-### Migration Example
-Your old configuration with deprecated settings:
-```xml
-<settings version="2">
-  <setting id="zipcode">92101</setting>
-  <setting id="useragent">Mozilla/5.0...</setting>  <!-- Removed -->
-  <setting id="desc01">10</setting>                  <!-- Removed -->
-  <!-- ... other desc02-desc20 removed ... -->
-</settings>
-```
-
-Becomes:
-```xml
-<settings version="3">
-  <setting id="zipcode">92101</setting>
-  <!-- Clean, modern configuration -->
-</settings>
-```
-
 ## INSTALLATION
 
 ### Synology DSM6/DSM7 TVH server
@@ -257,16 +234,16 @@ Already included in the SynoCommunity tvheadend package for DSM6-7 since v4.3.20
 tv_grab_zap2epg --capabilities
 
 # Test with debug logging
-tv_grab_zap2epg --days 1 --postal J3B1M4 --debug
+tv_grab_zap2epg --days 1 --zip 92101 --debug
 
 # Quiet operation
-tv_grab_zap2epg --days 1 --postal J3B1M4 --quiet
+tv_grab_zap2epg --days 1 --zip 92101 --quiet
 ```
 
 ### Synology Testing
 ```bash
 sudo su -s /bin/bash sc-tvheadend -c '~/bin/tv_grab_zap2epg --capabilities'
-sudo su -s /bin/bash sc-tvheadend -c '~/bin/tv_grab_zap2epg --days 1 --postal J3B1M4 --debug'
+sudo su -s /bin/bash sc-tvheadend -c '~/bin/tv_grab_zap2epg --days 1 --zip 92101 --debug'
 ```
 
 ### Docker Testing
@@ -275,29 +252,43 @@ sudo su -s /bin/bash sc-tvheadend -c '~/bin/tv_grab_zap2epg --days 1 --postal J3
 su - hts -c "tv_grab_zap2epg --days 1 --zip 90210 --debug"
 ```
 
-## Advanced Features
+## Python Dependencies
 
-### Debug Mode
-Enable with `--debug` for detailed information:
-- Download statistics and timing
-- Cache efficiency metrics
-- WAF block detection and handling
-- Channel matching details
-- Description enhancement statistics
-- Configuration processing details
+The script requires minimal external dependencies for optimal functionality:
 
-### Performance Optimization
-- **First Run**: May take longer as series details are downloaded and cached
-- **Subsequent Runs**: Much faster due to intelligent cache reuse
-- **Refresh Strategy**: Only refreshes recent guide data (48 hours) while preserving older cached blocks
-- **Network Efficiency**: Minimizes API requests through smart caching
+### Required Package
+```bash
+pip install requests>=2.25.0
+```
 
-### Error Handling
-- Automatic retry with exponential backoff
-- WAF protection with adaptive delays
-- Safe backup/restore for failed downloads
-- Graceful degradation when TVH is unavailable
-- Comprehensive error logging
+### What's Included Automatically
+- **urllib3** - HTTP connection pooling (installed with requests)
+- **certifi** - SSL certificates (included in Python 3.8+)  
+- **charset-normalizer/chardet** - Character encoding (requests dependency)
+
+### Installation Examples
+
+**Simple Installation (Recommended):**
+```bash
+# Create virtual environment
+python3 -m venv zap2epg-env
+source zap2epg-env/bin/activate
+
+# Install single dependency
+pip install requests
+
+# Test installation
+python3 -c "import requests; print('✓ Dependencies ready')"
+```
+
+### Standard Library Modules (No Installation Needed)
+The script primarily uses Python's built-in modules:
+- `urllib.request` - HTTP fallback method
+- `json`, `xml.etree.ElementTree` - Data parsing
+- `gzip` - Cache compression
+- `datetime`, `time` - Date/time handling
+- `logging` - Debug output
+- `os`, `sys` - System operations
 
 ## Troubleshooting
 
@@ -383,10 +374,6 @@ Extended details processing completed:
 - **Automatic XMLTV Backup**: Safe backup system with smart retention
 - **Optimized Series Details**: Dramatically improved cache reuse for extended details
 - **Enhanced Statistics**: Detailed cache efficiency and performance metrics
-- **Intelligent TVheadend channel filtering** (fixed)
-- **Enhanced description system** with intelligent formatting
-- **Automated configuration management** and cleanup
-- **Multi-platform auto-detection**
 - **Optimized downloads** with WAF protection
 - **Comprehensive debug logging** and statistics
 - **Improved error handling** and resilience
