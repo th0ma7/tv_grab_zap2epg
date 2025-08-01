@@ -1351,15 +1351,15 @@ def mainRun(userdata):
         try:
             # PRIORITY 1: Use extended series description from downloaded JSON if available
             extended_desc = edict.get('epseriesdesc')
-            if extended_desc:
-                extended_desc = extended_desc.strip()
+            if extended_desc and str(extended_desc).strip():
+                extended_desc = str(extended_desc).strip()
             else:
                 extended_desc = ''
 
             # PRIORITY 2: Use basic episode description from TV guide
             guide_desc = edict.get('epdesc')
-            if guide_desc:
-                guide_desc = guide_desc.strip()
+            if guide_desc and str(guide_desc).strip():
+                guide_desc = str(guide_desc).strip()
             else:
                 guide_desc = ''
 
@@ -1384,27 +1384,30 @@ def mainRun(userdata):
 
             # Add season/episode info for series
             if edict.get('epsn') and edict.get('epen'):
-                season_ep = f"S{int(edict['epsn']):02d}E{int(edict['epen']):02d}"
-                additional_info.append(season_ep)
+                try:
+                    season_ep = f"S{int(edict['epsn']):02d}E{int(edict['epen']):02d}"
+                    additional_info.append(season_ep)
+                except (ValueError, TypeError):
+                    pass  # Skip if season/episode aren't valid numbers
 
             # Add premiere date if available
-            if edict.get('epoad') and int(edict['epoad']) > 0:
+            if edict.get('epoad') and str(edict['epoad']).isdigit() and int(edict['epoad']) > 0:
                 try:
                     is_dst = time.daylight and time.localtime().tm_isdst > 0
                     TZoffset = (time.altzone if is_dst else time.timezone)
                     origDate = int(edict['epoad']) + TZoffset
                     premiere_date = datetime.datetime.fromtimestamp(origDate).strftime('%Y-%m-%d')
                     additional_info.append(f"Premiered: {premiere_date}")
-                except:
-                    pass
+                except (ValueError, TypeError, OSError):
+                    pass  # Skip if date conversion fails
 
             # Add rating if available
-            if edict.get('eprating'):
+            if edict.get('eprating') and str(edict['eprating']).strip():
                 additional_info.append(f"Rated: {edict['eprating']}")
 
             # Add flags
             flags = []
-            if edict.get('epflag'):
+            if edict.get('epflag') and isinstance(edict['epflag'], (list, tuple)):
                 if 'New' in edict['epflag']:
                     flags.append('NEW')
                 if 'Live' in edict['epflag']:
@@ -1414,7 +1417,7 @@ def mainRun(userdata):
                 if 'Finale' in edict['epflag']:
                     flags.append('FINALE')
 
-            if edict.get('eptags'):
+            if edict.get('eptags') and isinstance(edict['eptags'], (list, tuple)):
                 if 'CC' in edict['eptags']:
                     flags.append('CC')
                 if 'HD' in edict['eptags']:
@@ -1435,10 +1438,16 @@ def mainRun(userdata):
             return base_desc if base_desc else None
 
         except Exception as e:
-            logging.warning('Error creating enhanced description: %s', str(e))
+            logging.warning('Error creating enhanced description for episode %s: %s',
+                          edict.get('epid', 'unknown'), str(e))
             # Fallback to basic description with safe handling
-            basic_desc = edict.get('epdesc')
-            return basic_desc.strip() if basic_desc else None
+            try:
+                basic_desc = edict.get('epdesc')
+                if basic_desc and str(basic_desc).strip():
+                    return str(basic_desc).strip()
+            except:
+                pass
+            return None
 
     def printEpisodes(fh):
         global episodeCount
@@ -1487,11 +1496,14 @@ def mainRun(userdata):
                                 if xdesc is True and need_extended_download:
                                     try:
                                         enhanced_desc = addXDetails(edict)
-                                        if enhanced_desc and enhanced_desc.strip():
+                                        if enhanced_desc and str(enhanced_desc).strip():
                                             # Check if this is truly enhanced (not just the basic description)
-                                            basic_desc = edict.get('epdesc', '').strip()
-                                            if (enhanced_desc.strip() != basic_desc or
-                                                edict.get('epseriesdesc', '').strip()):  # Has extended data
+                                            basic_desc = edict.get('epdesc')
+                                            basic_desc_str = str(basic_desc).strip() if basic_desc else ''
+                                            enhanced_desc_str = str(enhanced_desc).strip()
+
+                                            if (enhanced_desc_str != basic_desc_str or
+                                                edict.get('epseriesdesc')):  # Has extended data
                                                 fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(enhanced_desc) + '</desc>\n')
                                                 enhanced_desc_count += 1
                                                 description_written = True
@@ -1500,8 +1512,9 @@ def mainRun(userdata):
 
                                 # Fallback to basic description
                                 if not description_written:
-                                    if edict.get('epdesc') and str(edict['epdesc']).strip():
-                                        fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(edict['epdesc']) + '</desc>\n')
+                                    basic_desc = edict.get('epdesc')
+                                    if basic_desc and str(basic_desc).strip():
+                                        fh.write('\t\t<desc lang=\"' + lang + '\">' + convHTML(basic_desc) + '</desc>\n')
                                         basic_desc_count += 1
                                         description_written = True
 
